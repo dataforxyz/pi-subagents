@@ -162,7 +162,7 @@ function createSlashResultComponent(
 function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | undefined {
 	const lines = content.split("\n");
 	const header = lines[0] ?? "";
-	const match = header.match(/^Background task (completed|failed|paused): \*\*(.+?)\*\*(?:\s+(\([^)]*\)))?$/);
+	const match = header.match(/^Background (?:task|step) (completed|failed|paused): \*\*(.+?)\*\*(?:\s+(\([^)]*\)|#[^\s]+))?$/);
 	if (!match) return undefined;
 	const body = lines.slice(2);
 	let sessionIndex = -1;
@@ -488,7 +488,7 @@ DIAGNOSTICS:
 			}
 		}
 	}
-	registerSubagentNotify(pi);
+	registerSubagentNotify(pi, config.backgroundForkHandlers, () => state.lastUiContext?.sessionManager.getSessionFile() ?? undefined);
 
 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
 	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();
@@ -499,6 +499,8 @@ DIAGNOSTICS:
 			state,
 			visibleControlNotices,
 			details: payload as SubagentControlMessageDetails,
+			backgroundForkHandlers: config.backgroundForkHandlers,
+			getParentSessionFile: () => state.lastUiContext?.sessionManager.getSessionFile() ?? undefined,
 		});
 	};
 	const eventUnsubscribes = [
