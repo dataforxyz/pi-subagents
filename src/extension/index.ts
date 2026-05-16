@@ -429,6 +429,12 @@ CONTROL:
 
 DIAGNOSTICS:
 • { action: "doctor" } - read-only report for runtime paths, discovery, sessions, and intercom`,
+		promptGuidelines: [
+			"Sync (default) blocks the calling agent until the subagent finishes. Prefer async: true (or PARALLEL with multiple long tasks) so the turn can end and the parent is woken via intercom on completion.",
+			"Use sync only when the parent must consume the subagent's output before its next tool call (e.g., chain composition, immediate code-review verdict). Anything that takes longer than a couple of minutes should be async.",
+			"For waiting on external state (file appears, process exits, port opens, url ready, log line matches), use return_on rather than spinning a subagent.",
+			"After async dispatch, do not poll subagent({action:'status'}) in a loop. Either wait for the intercom completion message or register a return_on watcher on the run's result file.",
+		],
 		parameters: SubagentParams,
 
 		execute(id, params, signal, onUpdate, ctx) {
