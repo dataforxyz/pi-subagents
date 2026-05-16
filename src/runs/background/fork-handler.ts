@@ -83,10 +83,11 @@ function buildSystemPrompt(run: BackgroundForkRun): string {
 	return [
 		"You are a background pi-subagents event handler in a sibling Pi process.",
 		"Handle only the subagent event capsule in the latest user message.",
-		"Do not continue unrelated parent work. Do not interrupt the parent unless a real decision is required.",
+		"Do not continue unrelated parent work. Do not interrupt the parent unless a real decision or required parent action is needed.",
 		"You may inspect referenced files, child session files, artifacts, and repo state to summarize or triage the event.",
-		"If the event contains a concrete recommended parent action or parent follow-up is required, notify the parent through intercom instead of only writing a final summary.",
-		"Use intercom({ action: \"send\", to: <parent>, message: ... }) for actionable non-blocking parent notices; use intercom.ask only for true blocking decisions.",
+		"Do the safe triage/checking in this fork. Do not send optional next steps, routine success, or no-action-needed updates back to the parent.",
+		"If the event contains a concrete required parent action, blocker, or required parent follow-up, notify the parent through intercom instead of only writing a final summary.",
+		"Use intercom({ action: \"send\", to: <parent>, message: ... }) for required actionable non-blocking parent notices; use intercom.ask only for true blocking decisions.",
 		"Escalate only for destructive actions, ambiguous user preference, external side effects, security/privacy/cost risk, conflict with current parent work, or low confidence.",
 		...(run.parentIntercomTarget ? [`Parent intercom target: ${run.parentIntercomTarget}`] : []),
 		`Handler id: ${run.id}`,
@@ -114,10 +115,11 @@ function buildPrompt(event: SubagentBackgroundForkEvent, run: BackgroundForkRun)
 		"## Instructions",
 		"",
 		"Handle this background event without waking the parent feed for routine summaries. If the event includes a child session or artifact path, read it only when it helps triage accurately.",
+		"Do safe checks in this fork. If your conclusion is routine success, optional follow-up, or no action needed, do not send an intercom message to the parent; just state that in your final summary.",
 		...(run.parentIntercomTarget
 			? [
 				`Parent intercom target: ${run.parentIntercomTarget}`,
-				`If the event content includes a concrete recommended parent action, blocker, or required parent follow-up, call intercom({ action: \"send\", to: ${JSON.stringify(run.parentIntercomTarget)}, message: \"...\" }) with a concise action request so the parent can start it. If delivery fails because the target is stale, missing, or ambiguous, call intercom({ action: \"list\" }) and retry with the full id of the non-fork parent session that matches this event's cwd/name, excluding sessions whose status contains \"fork-handler:\". Use intercom.ask only if you need a decision before you can proceed.`,
+				`Only if the event content includes a concrete required parent action, blocker, or required parent follow-up, call intercom({ action: \"send\", to: ${JSON.stringify(run.parentIntercomTarget)}, message: \"...\" }) with a concise action request so the parent can start it. If delivery fails because the target is stale, missing, or ambiguous, call intercom({ action: \"list\" }) and retry with the full id of the non-fork parent session that matches this event's cwd/name, excluding sessions whose status contains \"fork-handler:\". Use intercom.ask only if you need a decision before you can proceed.`,
 			]
 			: ["No parent intercom target is available; include any required parent action in your final summary."]),
 		"Final summary: state what you inspected, what you sent/escalated to the parent if anything, and whether further parent action is still needed.",
