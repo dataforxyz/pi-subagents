@@ -489,7 +489,11 @@ DIAGNOSTICS:
 		}
 	}
 	const getParentSessionFile = () => state.lastUiContext?.sessionManager.getSessionFile() ?? undefined;
-	const getParentIntercomTarget = () => state.currentSessionId ?? pi.getSessionName?.() ?? undefined;
+	const getParentIntercomTarget = () => {
+		const sessionName = pi.getSessionName?.()?.trim();
+		if (sessionName) return sessionName;
+		return state.lastUiContext?.sessionManager.getSessionId() ?? state.currentSessionId ?? undefined;
+	};
 	registerSubagentNotify(pi, config.backgroundForkHandlers, getParentSessionFile, getParentIntercomTarget);
 
 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
