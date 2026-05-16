@@ -55,7 +55,12 @@ interface SubagentStepResult {
 	intercomTarget?: string;
 }
 
-export default function registerSubagentNotify(pi: ExtensionAPI, backgroundForkHandlers?: BackgroundForkHandlersConfig, getParentSessionFile?: () => string | null | undefined): void {
+export default function registerSubagentNotify(
+	pi: ExtensionAPI,
+	backgroundForkHandlers?: BackgroundForkHandlersConfig,
+	getParentSessionFile?: () => string | null | undefined,
+	getParentIntercomTarget?: () => string | null | undefined,
+): void {
 	const unsubscribeStoreKey = "__pi_subagents_notify_unsubscribe__";
 	const globalStore = globalThis as Record<string, unknown>;
 	const previousUnsubscribe = globalStore[unsubscribeStoreKey];
@@ -115,6 +120,7 @@ export default function registerSubagentNotify(pi: ExtensionAPI, backgroundForkH
 			content,
 			cwd: process.cwd(),
 			parentSessionFile: getParentSessionFile?.() ?? undefined,
+			parentIntercomTarget: getParentIntercomTarget?.() ?? undefined,
 			details: { agent, status, taskInfo, resultPreview: displaySummary, durationMs: result.durationMs, sessionLabel: sessionLine ? "session" : undefined, sessionValue: result.shareUrl ?? result.sessionFile },
 		});
 	};
@@ -150,6 +156,7 @@ export default function registerSubagentNotify(pi: ExtensionAPI, backgroundForkH
 			content,
 			cwd: process.cwd(),
 			parentSessionFile: getParentSessionFile?.() ?? undefined,
+			parentIntercomTarget: getParentIntercomTarget?.() ?? undefined,
 			details: {
 				agent,
 				status,

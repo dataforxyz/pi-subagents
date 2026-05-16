@@ -37,11 +37,12 @@ export function clearPendingForegroundControlNotices(state: SubagentState, runId
 }
 
 function deliverControlNotice(input: {
-	pi: Pick<ExtensionAPI, "sendMessage">;
+	pi: Pick<ExtensionAPI, "sendMessage" | "getSessionName">;
 	visibleControlNotices: Set<string>;
 	details: SubagentControlMessageDetails;
 	backgroundForkHandlers?: BackgroundForkHandlersConfig;
 	getParentSessionFile?: () => string | null | undefined;
+	getParentIntercomTarget?: () => string | null | undefined;
 }): void {
 	const childIntercomTarget = controlNoticeTarget(input.details);
 	const key = controlNotificationKey(input.details.event, childIntercomTarget);
@@ -55,6 +56,7 @@ function deliverControlNotice(input: {
 			title: `Subagent needs attention: ${input.details.event.agent}`,
 			content: noticeText,
 			parentSessionFile: input.getParentSessionFile?.() ?? undefined,
+			parentIntercomTarget: input.getParentIntercomTarget?.() ?? undefined,
 			details: messageDetails,
 		});
 		return;
@@ -79,13 +81,14 @@ function isForegroundNoticeStillActionable(state: SubagentState, details: Subage
 }
 
 export function handleSubagentControlNotice(input: {
-	pi: Pick<ExtensionAPI, "sendMessage">;
+	pi: Pick<ExtensionAPI, "sendMessage" | "getSessionName">;
 	state: SubagentState;
 	visibleControlNotices: Set<string>;
 	details: SubagentControlMessageDetails;
 	foregroundDelayMs?: number;
 	backgroundForkHandlers?: BackgroundForkHandlersConfig;
 	getParentSessionFile?: () => string | null | undefined;
+	getParentIntercomTarget?: () => string | null | undefined;
 }): void {
 	if (!input.details?.event || input.details.event.type === "active_long_running") return;
 	if (input.details.source !== "foreground") {

@@ -22,6 +22,7 @@ export interface SubagentBackgroundForkEvent {
 	content: string;
 	cwd?: string;
 	parentSessionFile?: string;
+	parentIntercomTarget?: string;
 	details?: unknown;
 }
 
@@ -37,6 +38,7 @@ interface BackgroundForkRun {
 	stderrPath: string;
 	sessionDir: string;
 	parentSessionFile?: string;
+	parentIntercomTarget?: string;
 	pid?: number;
 }
 
@@ -83,7 +85,10 @@ function buildSystemPrompt(run: BackgroundForkRun): string {
 		"Handle only the subagent event capsule in the latest user message.",
 		"Do not continue unrelated parent work. Do not interrupt the parent unless a real decision is required.",
 		"You may inspect referenced files, child session files, artifacts, and repo state to summarize or triage the event.",
+		"If the event contains a concrete recommended parent action or parent follow-up is required, notify the parent through intercom instead of only writing a final summary.",
+		"Use intercom({ action: \"send\", to: <parent>, message: ... }) for actionable non-blocking parent notices; use intercom.ask only for true blocking decisions.",
 		"Escalate only for destructive actions, ambiguous user preference, external side effects, security/privacy/cost risk, conflict with current parent work, or low confidence.",
+		...(run.parentIntercomTarget ? [`Parent intercom target: ${run.parentIntercomTarget}`] : []),
 		`Handler id: ${run.id}`,
 	].join("\n");
 }
@@ -108,7 +113,14 @@ function buildPrompt(event: SubagentBackgroundForkEvent, run: BackgroundForkRun)
 		"",
 		"## Instructions",
 		"",
-		"Handle this background event without waking the parent feed. Summarize the outcome, blockers, and any recommended next action. If the event includes a child session or artifact path, read it only when it helps triage accurately.",
+		"Handle this background event without waking the parent feed for routine summaries. If the event includes a child session or artifact path, read it only when it helps triage accurately.",
+		...(run.parentIntercomTarget
+			? [
+				`Parent intercom target: ${run.parentIntercomTarget}`,
+				`If the event content includes a concrete recommended parent action, blocker, or required parent follow-up, call intercom({ action: \"send\", to: ${JSON.stringify(run.parentIntercomTarget)}, message: \"...\" }) with a concise action request so the parent can start it. Use intercom.ask only if you need a decision before you can proceed.`,
+			]
+			: ["No parent intercom target is available; include any required parent action in your final summary."]),
+		"Final summary: state what you inspected, what you sent/escalated to the parent if anything, and whether further parent action is still needed.",
 	].join("\n");
 }
 
@@ -177,6 +189,7 @@ export async function deliverBackgroundForkEvent(
 				stderrPath: path.join(dir, "stderr.log"),
 				sessionDir: path.join(dir, "sessions"),
 				...(event.parentSessionFile ? { parentSessionFile: event.parentSessionFile } : {}),
+				...(event.parentIntercomTarget ? { parentIntercomTarget: event.parentIntercomTarget } : {}),
 			};
 		})();
 
