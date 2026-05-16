@@ -69,6 +69,12 @@ import {
 } from "../shared/worktree.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 
+const CHILD_EVENT_TYPES_OMITTED_FROM_ASYNC_LOG = new Set(["message_update", "tool_execution_update"]);
+
+function shouldPersistChildEvent(event: Record<string, unknown>): boolean {
+	return typeof event.type !== "string" || !CHILD_EVENT_TYPES_OMITTED_FROM_ASYNC_LOG.has(event.type);
+}
+
 function summarizeStepOutputForEvent(output: string | undefined, error?: string): string {
 	const text = error ? `${error}${output?.trim() ? `\n\nOutput:\n${output}` : ""}` : (output ?? "");
 	const trimmed = text.trim();
@@ -254,7 +260,7 @@ function runPiStreaming(
 		};
 
 		const appendChildEvent = (event: Record<string, unknown>) => {
-			if (!childEventContext) return;
+			if (!childEventContext || !shouldPersistChildEvent(event)) return;
 			appendJsonl(childEventContext.eventsPath, JSON.stringify({
 				...event,
 				subagentSource: "child",

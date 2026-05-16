@@ -1342,8 +1342,21 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 	it("background runs stream child events and live output while active", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({
 			steps: [
-				{ delay: 200, jsonl: [events.toolStart("bash", { command: "ls" })] },
-				{ delay: 600, jsonl: [events.toolEnd("bash"), events.toolResult("bash", "file-a\nfile-b")] },
+				{
+					delay: 200,
+					jsonl: [
+						events.toolStart("bash", { command: "ls" }),
+						{ type: "message_update", message: { content: [{ type: "text", text: "verbose partial" }] } },
+					],
+				},
+				{
+					delay: 600,
+					jsonl: [
+						{ type: "tool_execution_update", toolName: "bash", args: { command: "ls" } },
+						events.toolEnd("bash"),
+						events.toolResult("bash", "file-a\nfile-b"),
+					],
+				},
 				{ delay: 600, jsonl: [events.assistantMessage("Done streaming")], stderr: "warning: mock stderr\n" },
 			],
 		});
@@ -1405,6 +1418,18 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
 		assert.equal(payload.success, true);
 		assert.equal(payload.results[0].output, "Done streaming");
+
+		const eventsLog = fs.readFileSync(eventsPath, "utf-8");
+		assert.equal(
+			eventsLog.includes('"type":"message_update"'),
+			false,
+			"verbose message updates should not be persisted to async events.jsonl",
+		);
+		assert.equal(
+			eventsLog.includes('"type":"tool_execution_update"'),
+			false,
+			"verbose tool updates should not be persisted to async events.jsonl",
+		);
 
 		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8"));
 		assert.deepEqual(status.steps[0].recentTools.map((tool: { tool: string; args: string }) => ({ tool: tool.tool, args: tool.args })), [{ tool: "bash", args: "ls" }]);
