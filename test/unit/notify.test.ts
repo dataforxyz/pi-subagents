@@ -146,6 +146,23 @@ describe("registerSubagentNotify", () => {
 		});
 	});
 
+	it("suppresses single-step notifications because final completion covers them", () => {
+		const { events, sent } = createPi({ enabled: false });
+
+		events.emit(SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, {
+			id: "async-run-single",
+			runId: "async-run-single",
+			agent: "worker",
+			index: 0,
+			totalTasks: 1,
+			success: true,
+			exitCode: 0,
+			summary: "Single worker done.",
+		});
+
+		assert.equal(sent.length, 0);
+	});
+
 	it("uses non-triggering fallback when a fork handler launch fails", async () => {
 		const { events, sent } = createPi({ enabled: true, piCommand: "/definitely/missing/pi-subagents-handler" });
 

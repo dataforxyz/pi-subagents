@@ -127,6 +127,10 @@ export default function registerSubagentNotify(
 
 	const handleStepComplete = (data: unknown) => {
 		const result = data as SubagentStepResult;
+		if (typeof result.totalTasks === "number" && result.totalTasks <= 1) {
+			// A single-step run also emits the final async-complete event; avoid forking/displaying the same result twice.
+			return;
+		}
 		const now = Date.now();
 		const key = `step:${result.runId ?? result.id ?? "unknown"}:${result.index ?? "?"}:${result.exitCode ?? "?"}`;
 		if (markSeenWithTtl(seen, key, now, ttlMs)) return;
