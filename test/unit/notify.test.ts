@@ -110,7 +110,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual((sent[0] as any).options, { triggerTurn: false });
 	});
 
-	it("sends failed per-step notifications through explicit inline opt-out", () => {
+	it("suppresses failed per-step notifications because final completion covers them", () => {
 		const { events, sent } = createPi({ enabled: false });
 
 		events.emit(SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, {
@@ -126,24 +126,7 @@ describe("registerSubagentNotify", () => {
 			sessionFile: "/tmp/reviewer.jsonl",
 		});
 
-		assert.equal(sent.length, 1);
-		assert.deepEqual(sent[0], {
-			message: {
-				customType: "subagent-notify",
-				content: "Background step failed: **reviewer** (2/4)\n\nReview failed with blockers.\n\nSession file: /tmp/reviewer.jsonl",
-				display: true,
-				details: {
-					agent: "reviewer",
-					status: "failed",
-					taskInfo: " (2/4)",
-					resultPreview: "Review failed with blockers.",
-					durationMs: 1200,
-					sessionLabel: "session file",
-					sessionValue: "/tmp/reviewer.jsonl",
-				},
-			},
-			options: { triggerTurn: false },
-		});
+		assert.equal(sent.length, 0);
 	});
 
 	it("suppresses single-step notifications because final completion covers them", () => {
@@ -232,32 +215,21 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 0);
 	});
 
-	it("forks failed per-step completions by default without triggering the main feed", async () => {
-		const mockPi = createMockPi();
-		mockPi.install();
-		mockPi.onCall({ output: "failed step handled in fork" });
-		try {
-			const { events, sent } = createPi({ enabled: true });
-			events.emit(SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, {
-				id: "async-run-2-failed",
-				runId: "async-run-2-failed",
-				agent: "reviewer",
-				index: 0,
-				totalTasks: 2,
-				success: false,
-				exitCode: 1,
-				summary: "Review failed.",
-				durationMs: 1200,
-			});
+	it("suppresses failed per-step completions because final completion covers them", () => {
+		const { events, sent } = createPi({ enabled: true });
+		events.emit(SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, {
+			id: "async-run-2-failed",
+			runId: "async-run-2-failed",
+			agent: "reviewer",
+			index: 0,
+			totalTasks: 2,
+			success: false,
+			exitCode: 1,
+			summary: "Review failed.",
+			durationMs: 1200,
+		});
 
-			await waitForSent(sent, 2);
-			assert.equal(sent.some((entry) => (entry as any).options?.triggerTurn === true), false);
-			assert.equal((sent[0] as any).message.customType, "subagent-fork-handler");
-			assert.equal((sent[1] as any).message.details.status, "complete");
-			assert.match((sent[1] as any).message.content, /failed step handled in fork/);
-		} finally {
-			mockPi.uninstall();
-		}
+		assert.equal(sent.length, 0);
 	});
 
 	it("falls back without throwing when fork setup serialization fails", async () => {

@@ -41,20 +41,6 @@ interface SubagentResult {
 	totalTasks?: number;
 }
 
-interface SubagentStepResult {
-	id?: string;
-	runId?: string;
-	agent?: string;
-	index?: number;
-	totalTasks?: number;
-	success?: boolean;
-	exitCode?: number;
-	summary?: string;
-	durationMs?: number;
-	sessionFile?: string;
-	intercomTarget?: string;
-}
-
 export default function registerSubagentNotify(
 	pi: ExtensionAPI,
 	backgroundForkHandlers?: BackgroundForkHandlersConfig,
@@ -125,57 +111,10 @@ export default function registerSubagentNotify(
 		});
 	};
 
-	const handleStepComplete = (data: unknown) => {
-		const result = data as SubagentStepResult;
-		if (typeof result.totalTasks === "number" && result.totalTasks <= 1) {
-			// A single-step run also emits the final async-complete event; avoid forking/displaying the same result twice.
-			return;
-		}
-		const stepFailed = result.success === false || (typeof result.exitCode === "number" && result.exitCode !== 0);
-		if (!stepFailed) {
-			// Successful intermediate steps are progress-only and are covered by the aggregate final completion.
-			// Fork only failed step completions so the parent gets actionable signal without duplicate success noise.
-			return;
-		}
-		const now = Date.now();
-		const key = `step:${result.runId ?? result.id ?? "unknown"}:${result.index ?? "?"}:${result.exitCode ?? "?"}`;
-		if (markSeenWithTtl(seen, key, now, ttlMs)) return;
-
-		const agent = result.agent ?? "unknown";
-		const status = result.success === false || (typeof result.exitCode === "number" && result.exitCode !== 0) ? "failed" : "completed";
-		const taskInfo = result.index !== undefined && result.totalTasks !== undefined
-			? ` (${result.index + 1}/${result.totalTasks})`
-			: result.index !== undefined
-				? ` (#${result.index + 1})`
-				: "";
-		const displaySummary = typeof result.summary === "string" && result.summary.trim() ? result.summary : "(no output)";
-		const sessionLine = result.sessionFile ? `Session file: ${result.sessionFile}` : undefined;
-		const content = [
-			`Background step ${status}: **${agent}**${taskInfo}`,
-			"",
-			displaySummary,
-			sessionLine ? "" : undefined,
-			sessionLine,
-		]
-			.filter((line) => line !== undefined)
-			.join("\n");
-
-		void deliverBackgroundForkEvent(pi, backgroundForkHandlers, {
-			type: "async-step-complete",
-			title: `Background step ${status}: ${agent}${taskInfo}`,
-			content,
-			cwd: process.cwd(),
-			parentSessionFile: getParentSessionFile?.() ?? undefined,
-			parentIntercomTarget: getParentIntercomTarget?.() ?? undefined,
-			details: {
-				agent,
-				status,
-				taskInfo,
-				resultPreview: displaySummary,
-				durationMs: result.durationMs,
-				...(sessionLine ? { sessionLabel: "session file", sessionValue: result.sessionFile } : {}),
-			},
-		});
+	const handleStepComplete = (_data: unknown) => {
+		// The aggregate async-complete event carries the final per-worker summaries, and
+		// control notices cover actionable in-progress attention. Suppress per-step
+		// completion handlers entirely to avoid duplicate fork summaries/escalations.
 	};
 
 	const unsubscribes = [
