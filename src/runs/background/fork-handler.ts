@@ -117,7 +117,7 @@ function buildPrompt(event: SubagentBackgroundForkEvent, run: BackgroundForkRun)
 		...(run.parentIntercomTarget
 			? [
 				`Parent intercom target: ${run.parentIntercomTarget}`,
-				`If the event content includes a concrete recommended parent action, blocker, or required parent follow-up, call intercom({ action: \"send\", to: ${JSON.stringify(run.parentIntercomTarget)}, message: \"...\" }) with a concise action request so the parent can start it. Use intercom.ask only if you need a decision before you can proceed.`,
+				`If the event content includes a concrete recommended parent action, blocker, or required parent follow-up, call intercom({ action: \"send\", to: ${JSON.stringify(run.parentIntercomTarget)}, message: \"...\" }) with a concise action request so the parent can start it. If delivery fails because the target is stale, missing, or ambiguous, call intercom({ action: \"list\" }) and retry with the full id of the non-fork parent session that matches this event's cwd/name, excluding sessions whose status contains \"fork-handler:\". Use intercom.ask only if you need a decision before you can proceed.`,
 			]
 			: ["No parent intercom target is available; include any required parent action in your final summary."]),
 		"Final summary: state what you inspected, what you sent/escalated to the parent if anything, and whether further parent action is still needed.",
