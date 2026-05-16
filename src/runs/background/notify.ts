@@ -131,6 +131,12 @@ export default function registerSubagentNotify(
 			// A single-step run also emits the final async-complete event; avoid forking/displaying the same result twice.
 			return;
 		}
+		const stepFailed = result.success === false || (typeof result.exitCode === "number" && result.exitCode !== 0);
+		if (!stepFailed) {
+			// Successful intermediate steps are progress-only and are covered by the aggregate final completion.
+			// Fork only failed step completions so the parent gets actionable signal without duplicate success noise.
+			return;
+		}
 		const now = Date.now();
 		const key = `step:${result.runId ?? result.id ?? "unknown"}:${result.index ?? "?"}:${result.exitCode ?? "?"}`;
 		if (markSeenWithTtl(seen, key, now, ttlMs)) return;

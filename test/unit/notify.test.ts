@@ -110,7 +110,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual((sent[0] as any).options, { triggerTurn: false });
 	});
 
-	it("sends per-step notifications through explicit inline opt-out", () => {
+	it("sends failed per-step notifications through explicit inline opt-out", () => {
 		const { events, sent } = createPi({ enabled: false });
 
 		events.emit(SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, {
@@ -119,9 +119,9 @@ describe("registerSubagentNotify", () => {
 			agent: "reviewer",
 			index: 1,
 			totalTasks: 4,
-			success: true,
-			exitCode: 0,
-			summary: "Reviewed and found no blockers.",
+			success: false,
+			exitCode: 1,
+			summary: "Review failed with blockers.",
 			durationMs: 1200,
 			sessionFile: "/tmp/reviewer.jsonl",
 		});
@@ -130,13 +130,13 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Background step completed: **reviewer** (2/4)\n\nReviewed and found no blockers.\n\nSession file: /tmp/reviewer.jsonl",
+				content: "Background step failed: **reviewer** (2/4)\n\nReview failed with blockers.\n\nSession file: /tmp/reviewer.jsonl",
 				display: true,
 				details: {
 					agent: "reviewer",
-					status: "completed",
+					status: "failed",
 					taskInfo: " (2/4)",
-					resultPreview: "Reviewed and found no blockers.",
+					resultPreview: "Review failed with blockers.",
 					durationMs: 1200,
 					sessionLabel: "session file",
 					sessionValue: "/tmp/reviewer.jsonl",
@@ -215,21 +215,38 @@ describe("registerSubagentNotify", () => {
 		}
 	});
 
-	it("forks per-step background completions by default without triggering the main feed", async () => {
+	it("suppresses successful per-step completions because final completion covers them", () => {
+		const { events, sent } = createPi({ enabled: true });
+		events.emit(SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, {
+			id: "async-run-2",
+			runId: "async-run-2",
+			agent: "reviewer",
+			index: 0,
+			totalTasks: 2,
+			success: true,
+			exitCode: 0,
+			summary: "Reviewed.",
+			durationMs: 1200,
+		});
+
+		assert.equal(sent.length, 0);
+	});
+
+	it("forks failed per-step completions by default without triggering the main feed", async () => {
 		const mockPi = createMockPi();
 		mockPi.install();
-		mockPi.onCall({ output: "step handled in fork" });
+		mockPi.onCall({ output: "failed step handled in fork" });
 		try {
 			const { events, sent } = createPi({ enabled: true });
 			events.emit(SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, {
-				id: "async-run-2",
-				runId: "async-run-2",
+				id: "async-run-2-failed",
+				runId: "async-run-2-failed",
 				agent: "reviewer",
 				index: 0,
 				totalTasks: 2,
-				success: true,
-				exitCode: 0,
-				summary: "Reviewed.",
+				success: false,
+				exitCode: 1,
+				summary: "Review failed.",
 				durationMs: 1200,
 			});
 
@@ -237,7 +254,7 @@ describe("registerSubagentNotify", () => {
 			assert.equal(sent.some((entry) => (entry as any).options?.triggerTurn === true), false);
 			assert.equal((sent[0] as any).message.customType, "subagent-fork-handler");
 			assert.equal((sent[1] as any).message.details.status, "complete");
-			assert.match((sent[1] as any).message.content, /step handled in fork/);
+			assert.match((sent[1] as any).message.content, /failed step handled in fork/);
 		} finally {
 			mockPi.uninstall();
 		}
