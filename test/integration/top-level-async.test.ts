@@ -14,13 +14,21 @@ const mod = await tryImport<TopLevelAsyncModule>("./src/runs/background/top-leve
 const available = !!mod;
 
 describe("force top-level async helper", { skip: !available ? "pi packages not available" : undefined }, () => {
-	it("forces top-level calls async and disables clarify", () => {
-		const params = { async: false, clarify: true, agent: "worker" };
+	it("forces top-level calls async and disables clarify when async is unset", () => {
+		const params = { clarify: true, agent: "worker" };
 		const next = mod!.applyForceTopLevelAsyncOverride(params, 0, true);
 		assert.notEqual(next, params);
 		assert.equal(next.async, true);
 		assert.equal(next.clarify, false);
 		assert.equal(next.agent, "worker");
+	});
+
+	it("preserves explicit sync opt-in for top-level calls", () => {
+		const params = { async: false, clarify: true, agent: "worker" };
+		const next = mod!.applyForceTopLevelAsyncOverride(params, 0, true);
+		assert.equal(next, params);
+		assert.equal(next.async, false);
+		assert.equal(next.clarify, true);
 	});
 
 	it("leaves nested calls unchanged", () => {
