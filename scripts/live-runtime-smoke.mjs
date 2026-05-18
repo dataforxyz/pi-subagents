@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,7 +9,8 @@ const userPiCommand = join(homedir(), ".local", "bin", "pi");
 const piCommand = process.env.PI_LIVE_SMOKE_PI ?? (existsSync(userPiCommand) ? userPiCommand : "pi");
 const model = process.env.PI_LIVE_SMOKE_MODEL ?? "openai-codex/gpt-5.5:minimal";
 const keep = process.argv.includes("--keep");
-const smokeEnv = {
+const homeAgentDir = join(homedir(), ".pi", "agent");
+let smokeEnv = {
 	...process.env,
 	PATH: (process.env.PATH ?? "")
 		.split(delimiter)
@@ -63,20 +64,56 @@ function subagentToolResults(entries) {
 		.filter((message) => message?.role === "toolResult" && message.toolName === "subagent");
 }
 
-const list = run(piCommand, ["list"]);
-if (list.status !== 0) fail("pi list failed", { stdout: list.stdout, stderr: list.stderr });
-if (!list.stdout.includes(packageRoot)) {
-	fail("Pi settings do not appear to load this worktree package", {
-		packageRoot,
-		"pi list": list.stdout,
-	});
+function firstExistingPath(paths) {
+	return paths.find((candidate) => existsSync(candidate));
 }
 
 const tempRoot = mkdtempSync(join(tmpdir(), "pi-subagents-live-smoke-"));
+const agentDir = join(tempRoot, "agent");
 const sessionDir = join(tempRoot, "sessions");
+mkdirSync(agentDir, { recursive: true });
 mkdirSync(sessionDir, { recursive: true });
 
+const intercomRoot = firstExistingPath([
+	join(homedir(), "PrograminProjects", "pi-worktrees", "pi-intercom-live-context-demo"),
+	join(homedir(), "src", "github.com", "dataforxyz", "pi-intercom"),
+]);
+const packages = [packageRoot, intercomRoot].filter(Boolean);
+writeFileSync(join(agentDir, "settings.json"), `${JSON.stringify({
+	defaultProvider: "openai-codex",
+	defaultModel: "gpt-5.5",
+	defaultThinkingLevel: "minimal",
+	packages,
+}, null, 2)}\n`);
+
+for (const file of ["auth.json", "models.json"]) {
+	const source = join(homeAgentDir, file);
+	if (existsSync(source)) copyFileSync(source, join(agentDir, file));
+}
+
+const subagentConfigDir = join(agentDir, "extensions", "subagent");
+mkdirSync(subagentConfigDir, { recursive: true });
+writeFileSync(join(subagentConfigDir, "config.json"), `${JSON.stringify({
+	asyncByDefault: true,
+	forceTopLevelAsync: true,
+	backgroundForkHandlers: { enabled: true, notify: "summary", triggerParentOnSummary: false },
+}, null, 2)}\n`);
+
+smokeEnv = { ...smokeEnv, PI_CODING_AGENT_DIR: agentDir };
+
 try {
+	const list = run(piCommand, ["list"]);
+	if (list.status !== 0) fail("pi list failed", { stdout: list.stdout, stderr: list.stderr });
+	if (!list.stdout.includes(packageRoot)) {
+		fail("isolated Pi settings do not appear to load this worktree package", {
+			agentDir,
+			packageRoot,
+			"pi list": list.stdout,
+		});
+	}
+
+	console.log(`Using isolated PI_CODING_AGENT_DIR=${agentDir}`);
+
 	const doctorPrompt = "Use the subagent tool with action doctor. Then summarize the package root, package git line, asyncByDefault, forceTopLevelAsync, and background fork handler notify value.";
 	const doctor = run(piCommand, [
 		"-p",
@@ -123,7 +160,9 @@ try {
 	if (matching.details?.asyncId) fail("explicit async:false returned an async run receipt", { details: JSON.stringify(matching.details, null, 2) });
 
 	console.log("PASS pi-subagents live runtime smoke");
+	console.log(`agentDir=${agentDir}`);
 	console.log(`packageRoot=${packageRoot}`);
+	console.log(`packages=${packages.join(",")}`);
 	console.log(`sessionDir=${sessionDir}`);
 	console.log(`doctorSession=${doctorSession}`);
 	console.log(`syncSession=${syncSession}`);

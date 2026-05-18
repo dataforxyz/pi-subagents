@@ -8,7 +8,7 @@
  * Modes: single (agent + task), parallel (tasks[]), chain (chain[] with {previous})
  * Toggle: async parameter (default: false, configurable via config.json)
  *
- * Config file: ~/.pi/agent/extensions/subagent/config.json
+ * Config file: $PI_CODING_AGENT_DIR/extensions/subagent/config.json, or ~/.pi/agent/extensions/subagent/config.json when PI_CODING_AGENT_DIR is unset.
  *   { "asyncByDefault": true, "forceTopLevelAsync": true, "maxSubagentDepth": 1, "intercomBridge": { "mode": "always", "instructionFile": "./intercom-bridge.md" }, "worktreeSetupHook": "./scripts/setup-worktree.mjs" }
  */
 
@@ -72,8 +72,12 @@ function getSubagentSessionRoot(parentSessionFile: string | null): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"));
 }
 
+function getPiAgentDir(): string {
+	return process.env.PI_CODING_AGENT_DIR ? path.resolve(process.env.PI_CODING_AGENT_DIR) : path.join(os.homedir(), ".pi", "agent");
+}
+
 function loadConfig(): ExtensionConfig {
-	const configPath = path.join(os.homedir(), ".pi", "agent", "extensions", "subagent", "config.json");
+	const configPath = path.join(getPiAgentDir(), "extensions", "subagent", "config.json");
 	try {
 		if (fs.existsSync(configPath)) {
 			return JSON.parse(fs.readFileSync(configPath, "utf-8")) as ExtensionConfig;
