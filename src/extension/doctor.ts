@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { discoverAgentsAll, type AgentSource } from "../agents/agents.ts";
 import { isAsyncAvailable } from "../runs/background/async-execution.ts";
 import { diagnoseIntercomBridge, type IntercomBridgeDiagnostic } from "../intercom/intercom-bridge.ts";
@@ -12,6 +14,7 @@ import {
 	type ExtensionConfig,
 	type SubagentState,
 } from "../shared/types.ts";
+import { resolveBackgroundForkHandlersConfig } from "../runs/background/fork-handler.ts";
 
 interface DoctorPaths {
 	tempRootDir: string;
@@ -25,6 +28,7 @@ interface DoctorDeps {
 	discoverAgentsAll: typeof discoverAgentsAll;
 	discoverAvailableSkills: typeof discoverAvailableSkills;
 	diagnoseIntercomBridge: typeof diagnoseIntercomBridge;
+	gitInfo: (packageRoot: string) => string;
 }
 
 interface DoctorReportInput {
@@ -38,9 +42,12 @@ interface DoctorReportInput {
 	orchestratorTarget?: string;
 	sessionError?: string;
 	expandTilde?: (value: string) => string;
+	packageRoot?: string;
 	paths?: DoctorPaths;
 	deps?: Partial<DoctorDeps>;
 }
+
+const DEFAULT_PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const DEFAULT_PATHS: DoctorPaths = {
 	tempRootDir: TEMP_ROOT_DIR,
@@ -49,11 +56,23 @@ const DEFAULT_PATHS: DoctorPaths = {
 	chainRunsDir: CHAIN_RUNS_DIR,
 };
 
+function formatGitInfo(packageRoot: string): string {
+	try {
+		const branch = execFileSync("git", ["-C", packageRoot, "branch", "--show-current"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+		const commit = execFileSync("git", ["-C", packageRoot, "rev-parse", "--short", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+		const dirty = execFileSync("git", ["-C", packageRoot, "status", "--short"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+		return `${branch || "detached"}@${commit}${dirty ? " dirty" : " clean"}`;
+	} catch {
+		return "not a git checkout";
+	}
+}
+
 const DEFAULT_DEPS: DoctorDeps = {
 	isAsyncAvailable,
 	discoverAgentsAll,
 	discoverAvailableSkills,
 	diagnoseIntercomBridge,
+	gitInfo: formatGitInfo,
 };
 
 function errorText(error: unknown): string {
@@ -112,6 +131,19 @@ function formatConfiguredSessionDir(input: DoctorReportInput): string {
 		return path.resolve(input.expandTilde?.(input.config.defaultSessionDir) ?? input.config.defaultSessionDir);
 	}
 	return "not configured";
+}
+
+function formatRuntimeConfigLines(input: DoctorReportInput, deps: DoctorDeps): string[] {
+	const backgroundForkHandlers = resolveBackgroundForkHandlersConfig(input.config.backgroundForkHandlers);
+	const packageRoot = input.packageRoot ?? DEFAULT_PACKAGE_ROOT;
+	return [
+		`- package root: ${packageRoot}`,
+		lineFromCheck("package git", () => `- package git: ${deps.gitInfo(packageRoot)}`),
+		`- asyncByDefault: ${input.config.asyncByDefault === true}`,
+		`- forceTopLevelAsync: ${input.config.forceTopLevelAsync === true}`,
+		`- maxSubagentDepth: ${input.config.maxSubagentDepth ?? "default"}`,
+		`- background fork handlers: ${backgroundForkHandlers.enabled ? "enabled" : "disabled"}; notify=${backgroundForkHandlers.notify}; triggerParentOnSummary=${backgroundForkHandlers.triggerParentOnSummary}`,
+	];
 }
 
 function formatSessionLines(input: DoctorReportInput): string[] {
@@ -176,6 +208,7 @@ export function buildDoctorReport(input: DoctorReportInput): string {
 		"Runtime",
 		`- cwd: ${input.cwd}`,
 		lineFromCheck("async support", () => `- async support: ${deps.isAsyncAvailable() ? "available" : "unavailable"}`),
+		...formatRuntimeConfigLines(input, deps),
 		...formatSessionLines(input),
 		"",
 		"Filesystem",

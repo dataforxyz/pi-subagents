@@ -991,6 +991,16 @@ Then `/take-screenshot https://example.com` switches to Sonnet, delegates to `br
 
 For more reusable workflows on top of subagents, including `/chain-prompts` and compare-style prompts such as `/best-of-n`, install `pi-prompt-template-model` separately and copy the examples you want into `~/.pi/agent/prompts/`.
 
+## Live runtime smoke test
+
+When testing a local worktree through Pi package settings, run:
+
+```bash
+npm run smoke:live
+```
+
+The smoke test starts fresh `pi -p` sessions, verifies `subagent doctor` reports this package root plus key config values, and confirms an explicit `async:false` delegate call returns synchronously instead of being forced into an async run. Use `-- --keep` to keep the temporary session directory for inspection.
+
 ## Runtime files
 
 The main runtime files are:
