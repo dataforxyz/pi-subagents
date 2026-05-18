@@ -53,6 +53,12 @@ const LOAD_SKILLS_CACHE_TTL_MS = 5000;
 const CONFIG_DIR = ".pi";
 const SUBAGENT_ORCHESTRATION_SKILL = "pi-subagents";
 
+function getLegacyUserAgentsDir(): string | null {
+	return process.env.PI_CODING_AGENT_DIR
+		? null
+		: path.join(os.homedir(), ".agents");
+}
+
 const SOURCE_PRIORITY: Record<SkillSource, number> = {
 	project: 700,
 	"project-settings": 650,
@@ -316,11 +322,15 @@ function collectSettingsPackageSkillPaths(cwd: string, agentDir: string): SkillS
 }
 
 function buildSkillPaths(cwd: string, agentDir: string): SkillSearchPath[] {
+	const legacyUserAgentsDir = getLegacyUserAgentsDir();
+	const legacyUserSkillPaths: SkillSearchPath[] = legacyUserAgentsDir
+		? [{ path: path.join(legacyUserAgentsDir, "skills"), source: "user" }]
+		: [];
 	const skillPaths: SkillSearchPath[] = [
 		{ path: path.join(cwd, CONFIG_DIR, "skills"), source: "project" },
 		{ path: path.join(cwd, ".agents", "skills"), source: "project" },
 		{ path: path.join(agentDir, "skills"), source: "user" },
-		{ path: path.join(os.homedir(), ".agents", "skills"), source: "user" },
+		...legacyUserSkillPaths,
 		...collectInstalledPackageSkillPaths(cwd, agentDir),
 		...collectSettingsPackageSkillPaths(cwd, agentDir),
 		...extractSkillPathsFromPackageRoot(cwd, "project-package"),
@@ -347,14 +357,15 @@ function inferSkillSource(filePath: string, cwd: string, agentDir: string, sourc
 	const userSkillsRoot = path.resolve(agentDir, "skills");
 	const userPackagesRoot = path.resolve(agentDir, "npm", "node_modules");
 	const userAgentRoot = path.resolve(agentDir);
-	const userAgentsRoot = path.resolve(os.homedir(), ".agents");
+	const legacyUserAgentsDir = getLegacyUserAgentsDir();
+	const userAgentsRoot = legacyUserAgentsDir ? path.resolve(legacyUserAgentsDir) : null;
 
 	if (isWithinPath(filePath, projectPackagesRoot)) return "project-package";
 	if (isWithinPath(filePath, projectSkillsRoot) || isWithinPath(filePath, projectAgentsRoot)) return "project";
 	if (isWithinPath(filePath, projectConfigRoot)) return "project-settings";
 
 	if (isWithinPath(filePath, userPackagesRoot)) return "user-package";
-	if (isWithinPath(filePath, userSkillsRoot) || isWithinPath(filePath, userAgentsRoot)) return "user";
+	if (isWithinPath(filePath, userSkillsRoot) || (userAgentsRoot && isWithinPath(filePath, userAgentsRoot))) return "user";
 	if (isWithinPath(filePath, userAgentRoot)) return "user-settings";
 
 	const globalRoot = getGlobalNpmRoot();

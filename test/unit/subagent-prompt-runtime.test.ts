@@ -9,6 +9,7 @@ import registerSubagentPromptRuntime, {
 	CHILD_FANOUT_BOUNDARY_INSTRUCTIONS,
 	CHILD_SUBAGENT_BOUNDARY_INSTRUCTIONS,
 	SUBAGENT_INTERCOM_SESSION_NAME_ENV,
+	compactRoutineHandlerReceiptMessages,
 	rewriteSubagentPrompt,
 	stripInheritedSkills,
 	stripParentOnlySubagentMessages,
@@ -186,6 +187,135 @@ describe("subagent prompt runtime", () => {
 		const otherCustom = { role: "custom", customType: "other", content: "keep" };
 
 		assert.deepEqual(stripParentOnlySubagentMessages([user, instruction, slashResult, notify, control, otherCustom]), [user, otherCustom]);
+	});
+
+	it("compacts routine handler receipts for child context while preserving lookup pointers", () => {
+		const handlerReceipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: [
+				"Background subagent event handler complete: delegate",
+				"Handler: sbf_123",
+				"Exit: 0",
+				"Output: /tmp/pi-subagents/run/stdout.log (12000 B)",
+				"Errors: none (/tmp/pi-subagents/run/stderr.log, 0 B)",
+				"",
+				"Routine success summary with useful marker DEMO_OK.",
+				`NOISY LINE 1 ${"x".repeat(500)}`,
+				`NOISY LINE 2 ${"x".repeat(500)}`,
+				`NOISY LINE 3 ${"x".repeat(500)}`,
+				`NOISY LINE 4 ${"x".repeat(500)}`,
+			].join("\n"),
+		};
+
+		const result = stripParentOnlySubagentMessages([handlerReceipt]);
+		assert.equal(result.length, 1);
+		const compacted = result[0] as { content: string };
+		assert.match(compacted.content, /compacted for child context/);
+		assert.match(compacted.content, /Handler: sbf_123/);
+		assert.match(compacted.content, /Output: \/tmp\/pi-subagents\/run\/stdout\.log \(12000 B\)/);
+		assert.match(compacted.content, /Errors: none/);
+		assert.match(compacted.content, /DEMO_OK/);
+		assert.doesNotMatch(compacted.content, /NOISY LINE 4/);
+		assert.ok(compacted.content.length < handlerReceipt.content.length);
+	});
+
+	it("does not compact handler receipts without a usable output log pointer", () => {
+		const receipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: "Background subagent event handler complete: delegate\nHandler: sbf_123\nExit: 0\nOutput: unavailable (/tmp/out.log, missing)\nErrors: none (/tmp/err.log, 0 B)\n\nSummary should stay inline because output is missing.",
+		};
+
+		assert.deepEqual(compactRoutineHandlerReceiptMessages([receipt]), [receipt]);
+	});
+
+	it("does not compact handler receipts with non-empty stderr", () => {
+		const receipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: "Background subagent event handler complete: delegate\nHandler: sbf_123\nExit: 0\nOutput: /tmp/out.log (10 B)\nErrors: /tmp/err.log (42 B)\n\nWarning details should stay inline.",
+		};
+
+		assert.deepEqual(compactRoutineHandlerReceiptMessages([receipt]), [receipt]);
+	});
+
+	it("does not compact handler receipts with later actionable blocker lines", () => {
+		const receipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: [
+				"Background subagent event handler complete: delegate",
+				"Handler: sbf_123",
+				"Exit: 0",
+				"Output: /tmp/out.log (10 B)",
+				"Errors: none (/tmp/err.log, 0 B)",
+				"Routine line one.",
+				"Routine line two.",
+				"Routine line three.",
+				"PARENT-DECISION: choose whether to continue.",
+			].join("\n"),
+		};
+
+		assert.deepEqual(compactRoutineHandlerReceiptMessages([receipt]), [receipt]);
+	});
+
+	it("preserves long handler log lookup pointers without truncation", () => {
+		const longOutput = `/tmp/${"a".repeat(350)}/stdout.log`;
+		const longErrors = `/tmp/${"b".repeat(350)}/stderr.log`;
+		const receipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: [
+				"Background subagent event handler complete: delegate",
+				"Handler: sbf_123",
+				"Exit: 0",
+				`Output: ${longOutput} (10 B)`,
+				`Errors: none (${longErrors}, 0 B)`,
+				"Routine summary.",
+			].join("\n"),
+		};
+
+		const result = compactRoutineHandlerReceiptMessages([receipt]);
+		const compacted = result[0] as { content: string };
+		assert.match(compacted.content, /compacted for child context/);
+		assert.match(compacted.content, new RegExp(`Output: ${longOutput.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(10 B\\)`));
+		assert.match(compacted.content, new RegExp(`Errors: none \\(${longErrors.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 0 B\\)`));
+		assert.doesNotMatch(compacted.content, /…/);
+	});
+
+	it("does not recompact already compacted handler receipts", () => {
+		const compactedReceipt = {
+			role: "custom",
+			customType: "return-on-handler",
+			content: "return_on handler receipt (compacted for model context; routine success).\nHandler: roh_123\nOutput: /tmp/out.log (10 B)",
+		};
+
+		assert.deepEqual(compactRoutineHandlerReceiptMessages([compactedReceipt]), [compactedReceipt]);
+	});
+
+	it("compacts routine handler receipts without stripping other parent messages", () => {
+		const notify = { role: "custom", customType: "subagent-notify", content: "keep in parent context" };
+		const handlerReceipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: "Background subagent event handler complete: delegate\nHandler: sbf_123\nExit: 0\nOutput: /tmp/out.log (10 B)\nErrors: none (/tmp/err.log, 0 B)\n\nRoutine summary.",
+		};
+
+		const result = compactRoutineHandlerReceiptMessages([notify, handlerReceipt]);
+		assert.equal(result[0], notify);
+		assert.match((result[1] as { content: string }).content, /compacted for child context/);
+		assert.match((result[1] as { content: string }).content, /Output: \/tmp\/out\.log/);
+	});
+
+	it("does not compact failed handler receipts", () => {
+		const failedReceipt = {
+			role: "custom",
+			customType: "return-on-handler",
+			content: "return_on handler failed: build\nHandler: roh_123\nExit: 1\nOutput: /tmp/out.log (10 B)\n\nFailure detail that should stay inline.",
+		};
+
+		assert.deepEqual(stripParentOnlySubagentMessages([failedReceipt]), [failedReceipt]);
 	});
 
 	it("strips prior parent subagent tool calls and results from forked child context", () => {

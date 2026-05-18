@@ -12,6 +12,10 @@ import {
 } from "../../src/agents/skills.ts";
 
 let tempDir = "";
+let tempHome = "";
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 function makeProjectSkill(cwd: string, name: string, body: string): void {
 	const skillDir = path.join(cwd, ".pi", "skills", name);
@@ -49,12 +53,23 @@ async function importSkillsFresh() {
 describe("skills filesystem fallback", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skills-fallback-"));
+		tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skills-home-"));
+		process.env.HOME = tempHome;
+		process.env.USERPROFILE = tempHome;
+		delete process.env.PI_CODING_AGENT_DIR;
 		clearSkillCache();
 	});
 
 	afterEach(() => {
 		clearSkillCache();
+		if (originalHome === undefined) delete process.env.HOME;
+		else process.env.HOME = originalHome;
+		if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = originalUserProfile;
+		if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
 		fs.rmSync(tempDir, { recursive: true, force: true });
+		fs.rmSync(tempHome, { recursive: true, force: true });
 	});
 
 	it("discovers project skills from filesystem paths", () => {
@@ -89,6 +104,36 @@ describe("skills filesystem fallback", () => {
 		const { resolved, missing } = resolveSkills(["pi-subagents", "safe-bash"], tempDir);
 		assert.deepEqual(missing, ["pi-subagents"]);
 		assert.deepEqual(resolved.map((skill) => skill.name), ["safe-bash"]);
+	});
+
+	it("uses PI_CODING_AGENT_DIR for user skills and settings", () => {
+		const isolatedAgentDir = path.join(tempDir, "isolated-agent");
+		process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+		const skillDir = path.join(isolatedAgentDir, "skills", "isolated-user-skill");
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(path.join(skillDir, "SKILL.md"), "Use isolated user skill.\n", "utf-8");
+		fs.writeFileSync(path.join(isolatedAgentDir, "settings.json"), JSON.stringify({ skills: ["./extra-skill/SKILL.md"] }, null, 2), "utf-8");
+		fs.mkdirSync(path.join(isolatedAgentDir, "extra-skill"), { recursive: true });
+		fs.writeFileSync(path.join(isolatedAgentDir, "extra-skill", "SKILL.md"), "Use isolated settings skill.\n", "utf-8");
+
+		const available = discoverAvailableSkills(tempDir);
+		assert.equal(available.find((skill) => skill.name === "isolated-user-skill")?.source, "user");
+		assert.equal(available.find((skill) => skill.name === "extra-skill")?.source, "user-settings");
+	});
+
+	it("does not read legacy ~/.agents skills while PI_CODING_AGENT_DIR is set", () => {
+		const isolatedAgentDir = path.join(tempDir, "isolated-agent");
+		process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+		const isolatedSkillDir = path.join(isolatedAgentDir, "skills", "isolated-user-skill");
+		fs.mkdirSync(isolatedSkillDir, { recursive: true });
+		fs.writeFileSync(path.join(isolatedSkillDir, "SKILL.md"), "Use isolated user skill.\n", "utf-8");
+		const legacySkillDir = path.join(os.homedir(), ".agents", "skills", "legacy-leak-skill");
+		fs.mkdirSync(legacySkillDir, { recursive: true });
+		fs.writeFileSync(path.join(legacySkillDir, "SKILL.md"), "Should not leak.\n", "utf-8");
+
+		const available = discoverAvailableSkills(tempDir).map((skill) => skill.name);
+		assert.equal(available.includes("isolated-user-skill"), true);
+		assert.equal(available.includes("legacy-leak-skill"), false);
 	});
 
 	it("classifies package-provided skills as project-package", () => {

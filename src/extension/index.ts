@@ -8,7 +8,7 @@
  * Modes: single (agent + task), parallel (tasks[]), chain (chain[] with {previous})
  * Toggle: async parameter (default: false, configurable via config.json)
  *
- * Config file: ~/.pi/agent/extensions/subagent/config.json
+ * Config file: $PI_CODING_AGENT_DIR/extensions/subagent/config.json, or ~/.pi/agent/extensions/subagent/config.json when PI_CODING_AGENT_DIR is unset.
  *   { "asyncByDefault": true, "forceTopLevelAsync": true, "maxSubagentDepth": 1, "intercomBridge": { "mode": "always", "instructionFile": "./intercom-bridge.md" }, "worktreeSetupHook": "./scripts/setup-worktree.mjs" }
  */
 
@@ -34,6 +34,7 @@ import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDet
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import registerSubagentNotify, { type SubagentNotifyDetails } from "../runs/background/notify.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_FANOUT_CHILD_ENV } from "../runs/shared/pi-args.ts";
+import { compactRoutineHandlerReceiptMessages } from "../runs/shared/subagent-prompt-runtime.ts";
 import registerFanoutChildSubagentExtension from "./fanout-child.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
 import { loadConfig } from "./config.ts";
@@ -231,6 +232,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const asyncByDefault = config.asyncByDefault === true;
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
+
+	pi.on("context", (event) => {
+		const messages = compactRoutineHandlerReceiptMessages(event.messages);
+		if (messages === event.messages) return undefined;
+		return { messages };
+	});
 
 	const state: SubagentState = {
 		baseCwd: "",

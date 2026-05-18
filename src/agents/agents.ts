@@ -151,6 +151,12 @@ interface AgentDiscoveryResult {
 	projectAgentsDir: string | null;
 }
 
+function getLegacyUserAgentsDir(): string | null {
+	return process.env.PI_CODING_AGENT_DIR
+		? null
+		: path.join(os.homedir(), ".agents");
+}
+
 function getUserChainDir(): string {
 	return path.join(getAgentDir(), "chains");
 }
@@ -770,7 +776,7 @@ const BUILTIN_AGENTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.u
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
 	const userDirOld = path.join(getAgentDir(), "agents");
-	const userDirNew = path.join(os.homedir(), ".agents");
+	const userDirNew = getLegacyUserAgentsDir();
 	const { readDirs: projectAgentDirs, preferredDir: projectAgentsDir } = resolveNearestProjectAgentDirs(cwd);
 	const userSettingsPath = getUserAgentSettingsPath();
 	const projectSettingsPath = getProjectAgentSettingsPath(cwd);
@@ -786,7 +792,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	);
 
 	const userAgentsOld = scope === "project" ? [] : loadAgentsFromDir(userDirOld, "user");
-	const userAgentsNew = scope === "project" ? [] : loadAgentsFromDir(userDirNew, "user");
+	const userAgentsNew = scope === "project" || !userDirNew ? [] : loadAgentsFromDir(userDirNew, "user");
 	const userAgents = [...userAgentsOld, ...userAgentsNew];
 
 	const projectAgents = scope === "user" ? [] : projectAgentDirs.flatMap((dir) => loadAgentsFromDir(dir, "project"));
@@ -810,7 +816,7 @@ export function discoverAgentsAll(cwd: string): {
 	projectSettingsPath: string | null;
 } {
 	const userDirOld = path.join(getAgentDir(), "agents");
-	const userDirNew = path.join(os.homedir(), ".agents");
+	const userDirNew = getLegacyUserAgentsDir();
 	const userChainDir = getUserChainDir();
 	const { readDirs: projectDirs, preferredDir: projectDir } = resolveNearestProjectAgentDirs(cwd);
 	const { readDirs: projectChainDirs, preferredDir: projectChainDir } = resolveNearestProjectChainDirs(cwd);
@@ -828,7 +834,7 @@ export function discoverAgentsAll(cwd: string): {
 	);
 	const user = [
 		...loadAgentsFromDir(userDirOld, "user"),
-		...loadAgentsFromDir(userDirNew, "user"),
+		...(userDirNew ? loadAgentsFromDir(userDirNew, "user") : []),
 	];
 	const projectMap = new Map<string, AgentConfig>();
 	for (const dir of projectDirs) {
@@ -857,7 +863,7 @@ export function discoverAgentsAll(cwd: string): {
 		...projectChainDiagnostics,
 	];
 
-	const userDir = process.env.PI_CODING_AGENT_DIR ? userDirOld : fs.existsSync(userDirNew) ? userDirNew : userDirOld;
+	const userDir = userDirNew && fs.existsSync(userDirNew) ? userDirNew : userDirOld;
 
 	return { builtin, user, project, chains, chainDiagnostics, userDir, projectDir, userChainDir, projectChainDir, userSettingsPath, projectSettingsPath };
 }

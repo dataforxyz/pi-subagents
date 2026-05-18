@@ -864,7 +864,7 @@ After a worktree parallel step completes, per-agent diff stats are appended to t
 
 ## Configuration
 
-`pi-subagents` reads optional JSON config from `~/.pi/agent/extensions/subagent/config.json`.
+`pi-subagents` reads optional JSON config from `$PI_CODING_AGENT_DIR/extensions/subagent/config.json` when `PI_CODING_AGENT_DIR` is set, otherwise from `~/.pi/agent/extensions/subagent/config.json`. User-scope agents, chains, skills, settings, intercom bridge config discovery, and session artifact cleanup use the same agent directory so isolated live tests do not read or clean the real `~/.pi/agent` tree.
 
 ### `asyncByDefault`
 
@@ -872,7 +872,7 @@ After a worktree parallel step completes, per-agent diff stats are appended to t
 { "asyncByDefault": true }
 ```
 
-Makes top-level calls use background execution when the request does not explicitly set `async`. Callers can still force foreground with `async: false` unless `forceTopLevelAsync` is enabled.
+Makes top-level calls use background execution when the request does not explicitly set `async`. Callers can still force foreground with `async: false`.
 
 ### `forceTopLevelAsync`
 
@@ -880,7 +880,7 @@ Makes top-level calls use background execution when the request does not explici
 { "forceTopLevelAsync": true }
 ```
 
-Forces depth-0 single, parallel, and chain runs into background mode and bypasses clarify UI by forcing `clarify: false`. Nested calls keep their own inherited settings.
+Forces depth-0 single, parallel, and chain runs into background mode and bypasses clarify UI by forcing `clarify: false` when the request does not explicitly set `async`. Use `async: false` to opt a top-level call back into synchronous/foreground execution. Nested calls keep their own inherited settings.
 
 ### `parallel`
 
@@ -939,18 +939,20 @@ The default injected guidance tells children to use `contact_supervisor` with `r
 {
   "backgroundForkHandlers": {
     "enabled": true,
-    "notify": "ack-and-summary",
+    "notify": "summary",
     "triggerParentOnSummary": false
   }
 }
 ```
 
-Async subagent completions and async control notices default to a sibling Pi handler instead of triggering the active parent feed. Successful and failed per-step completion records are coalesced into the aggregate async completion handler to avoid duplicate step + final summaries; actionable in-progress problems should use control notices. The parent receives passive handler ack/summary messages only; set `triggerParentOnSummary: true` only when summaries should start a parent turn. Set `enabled: false` to opt out of sibling handling; fallback delivery is still display-only and does not trigger a parent turn.
+Async subagent completions and async control notices default to a sibling Pi handler instead of triggering the active parent feed. Successful and failed per-step completion records are coalesced into the aggregate async completion handler to avoid duplicate step + final summaries; actionable in-progress problems should use control notices. The parent receives passive handler summaries only by default; set `notify: "ack-and-summary"` if launch acknowledgements are also needed, and set `triggerParentOnSummary: true` only when summaries should start a parent turn. Set `enabled: false` to opt out of sibling handling; fallback delivery is still display-only and does not trigger a parent turn.
+
+Routine-success handler receipts are compacted before model context is built so repeated background summaries do not bloat later turns. Compaction is conservative: the receipt must show success/exit 0, a usable `Output:` log path with byte size, an absent or empty `Errors:` line, and no inline blocker/action-required markers. Handler id, exit, Output/Errors pointers, byte sizes, and a few summary lines stay inline. Failed receipts, blocker/action-required receipts, non-empty stderr, missing/unavailable output logs, and already-compacted receipts are left unchanged.
 
 Fields:
 
 - `enabled`: default `true`; route interrupting background notifications through a sibling handler.
-- `notify`: default `ack-and-summary`; accepts `ack-and-summary`, `summary`, or `none`.
+- `notify`: default `summary`; accepts `ack-and-summary`, `summary`, or `none`.
 - `triggerParentOnSummary`: default `false`; keep summaries display-only unless explicitly enabled.
 - `piCommand`: optional Pi executable override for tests or custom installs.
 
@@ -1109,6 +1111,16 @@ Use url in the prompt to take screenshot: $@
 Then `/take-screenshot https://example.com` switches to Sonnet, delegates to `browser-screenshoter` with `/tmp/screenshots` as cwd, and restores your model when done. Runtime overrides like `--cwd=<path>` and `--subagent=<name>` work too.
 
 For more reusable workflows on top of subagents, including `/chain-prompts` and compare-style prompts such as `/best-of-n`, install `pi-prompt-template-model` separately and copy the examples you want into `~/.pi/agent/prompts/`.
+
+## Live runtime smoke test
+
+When testing a local worktree through Pi package settings, run:
+
+```bash
+npm run smoke:live
+```
+
+The smoke test starts fresh `pi -p` sessions with an isolated temporary `PI_CODING_AGENT_DIR`, writes test-only settings/config under that temp directory, verifies `subagent doctor` reports this package root plus key config values, and confirms an explicit `async:false` delegate call returns synchronously instead of being forced into an async run. Use `-- --keep` to keep the temporary agent/session directories for inspection.
 
 ## Runtime files
 
