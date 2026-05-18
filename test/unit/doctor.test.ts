@@ -61,7 +61,15 @@ describe("buildDoctorReport", () => {
 
 			const report = buildDoctorReport({
 				cwd: root,
-				config: { defaultSessionDir: "~/subagent-sessions", intercomBridge: { mode: "always" } },
+				config: {
+					asyncByDefault: true,
+					forceTopLevelAsync: true,
+					maxSubagentDepth: 3,
+					defaultSessionDir: "~/subagent-sessions",
+					intercomBridge: { mode: "always" },
+					backgroundForkHandlers: { enabled: true, notify: "summary", triggerParentOnSummary: false },
+				},
+				packageRoot: path.join(root, "package"),
 				state: makeState(root),
 				currentSessionFile: path.join(root, "sessions", "parent.jsonl"),
 				currentSessionId: "session-abc123",
@@ -70,6 +78,7 @@ describe("buildDoctorReport", () => {
 				paths,
 				deps: {
 					isAsyncAvailable: () => true,
+					gitInfo: () => "live-context-demo@abc123 clean",
 					discoverAgentsAll: () => ({
 						builtin: [makeAgent("builtin-a", "builtin")],
 						user: [makeAgent("user-a", "user")],
@@ -103,6 +112,12 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /^Subagents doctor report/);
 			assert.ok(report.includes(`- cwd: ${root}`));
 			assert.match(report, /- async support: available/);
+			assert.match(report, /- package root: .*package/);
+			assert.match(report, /- package git: live-context-demo@abc123 clean/);
+			assert.match(report, /- asyncByDefault: true/);
+			assert.match(report, /- forceTopLevelAsync: true/);
+			assert.match(report, /- maxSubagentDepth: 3/);
+			assert.match(report, /- background fork handlers: enabled; notify=summary; triggerParentOnSummary=false/);
 			assert.match(report, /- configured session dir: .*subagent-sessions/);
 			assert.match(report, /- current session file: .*parent\.jsonl/);
 			assert.match(report, /- temp root: ok /);
@@ -125,6 +140,7 @@ describe("buildDoctorReport", () => {
 				cwd: root,
 				config: {},
 				state: makeState(root),
+				packageRoot: path.join(root, "missing-package"),
 				paths: {
 					tempRootDir: root,
 					asyncDir: asyncPath,
@@ -133,6 +149,9 @@ describe("buildDoctorReport", () => {
 				},
 				deps: {
 					isAsyncAvailable: () => false,
+					gitInfo: () => {
+						throw new Error("git exploded");
+					},
 					discoverAgentsAll: () => {
 						throw new Error("discovery exploded");
 					},
@@ -150,6 +169,10 @@ describe("buildDoctorReport", () => {
 			});
 
 			assert.match(report, /- async support: unavailable/);
+			assert.match(report, /- package git: failed — Error: git exploded/);
+			assert.match(report, /- asyncByDefault: false/);
+			assert.match(report, /- forceTopLevelAsync: false/);
+			assert.match(report, /- background fork handlers: enabled; notify=summary; triggerParentOnSummary=false/);
 			assert.match(report, /- async runs: failed .*Error: not a directory:/);
 			assert.match(report, /- results: missing /);
 			assert.match(report, /- agents\/chains: failed — Error: discovery exploded/);

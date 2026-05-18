@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildForkHandlerEnv, buildForkRunPaths, getForkHandlersFile, getForkStateDir, launchDetachedFork } from "../../shared/fork-runtime.ts";
 import { SUBAGENT_CHILD_ENV } from "../shared/pi-args.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
@@ -43,6 +43,8 @@ interface BackgroundForkRun {
 	exitCode?: number | null;
 	signal?: NodeJS.Signals | null;
 	error?: string;
+	notify: BackgroundForkHandlerNotify;
+	triggerParentOnSummary: boolean;
 	pid?: number;
 }
 
@@ -61,6 +63,22 @@ function truncateText(text: string, limitBytes: number): string {
 	if (bytes <= limitBytes) return text;
 	const truncated = Buffer.from(text, "utf8").subarray(0, limitBytes).toString("utf8");
 	return `${truncated}\n… truncated ${bytes - limitBytes} bytes`;
+}
+
+function fileSizeBytes(filePath: string): number | null {
+	try {
+		return fs.statSync(filePath).size;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
+}
+
+function formatLogPath(label: "Output" | "Errors", filePath: string): string {
+	const size = fileSizeBytes(filePath);
+	if (size === null) return `${label}: unavailable (${filePath}, missing)`;
+	if (label === "Errors" && size === 0) return `${label}: none (${filePath}, 0 B)`;
+	return `${label}: ${filePath} (${size} B)`;
 }
 
 function sanitizeSegment(value: string): string {
@@ -107,10 +125,25 @@ async function patchPersistedRun(id: string, patch: Partial<BackgroundForkRun>):
 export function resolveBackgroundForkHandlersConfig(config?: BackgroundForkHandlersConfig): ResolvedBackgroundForkHandlersConfig {
 	return {
 		enabled: config?.enabled ?? true,
-		notify: config?.notify ?? "ack-and-summary",
+		notify: config?.notify ?? "summary",
 		triggerParentOnSummary: config?.triggerParentOnSummary ?? false,
 		...(config?.piCommand ? { piCommand: config.piCommand } : {}),
 	};
+}
+
+function parentNotificationModeLines(run: BackgroundForkRun): string[] {
+	if (run.notify === "none") {
+		return [
+			"Parent notification mode: none",
+			"Your final response is stored in handler logs only and will not be automatically posted to the parent transcript/context.",
+		];
+	}
+	return [
+		`Parent notification mode: ${run.notify}`,
+		`Your final response WILL be copied into the parent transcript/context${run.triggerParentOnSummary ? " and will trigger a parent turn" : ""}.`,
+		...(run.notify === "ack-and-summary" ? ["The parent already received a launch ack; do not repeat startup details unless relevant."] : []),
+		"Keep the final response concise. If you already sent an intercom message to the parent, do not repeat its full content; just note that you escalated it.",
+	];
 }
 
 function buildSystemPrompt(run: BackgroundForkRun): string {
@@ -124,6 +157,7 @@ function buildSystemPrompt(run: BackgroundForkRun): string {
 		"Use intercom({ action: \"send\", to: <parent>, message: ... }) for required actionable non-blocking parent notices; use intercom.ask only for true blocking decisions.",
 		"Escalate only for destructive actions, ambiguous user preference, external side effects, security/privacy/cost risk, conflict with current parent work, or low confidence.",
 		...(run.parentIntercomTarget ? [`Parent intercom target: ${run.parentIntercomTarget}`] : []),
+		...parentNotificationModeLines(run),
 		`Handler id: ${run.id}`,
 	].join("\n");
 }
@@ -147,6 +181,8 @@ function buildPrompt(event: SubagentBackgroundForkEvent, run: BackgroundForkRun)
 		"```",
 		"",
 		"## Instructions",
+		"",
+		...parentNotificationModeLines(run),
 		"",
 		"Handle this background event without waking the parent feed for routine summaries. If the event includes a child session or artifact path, read it only when it helps triage accurately.",
 		"Do safe checks in this fork. If your conclusion is routine success, optional follow-up, or no action needed, do not send an intercom message to the parent; just state that in your final summary.",
@@ -177,8 +213,8 @@ function formatSummary(run: BackgroundForkRun, status: "complete" | "failed", co
 		`Background subagent event handler ${status}: ${run.title}`,
 		`Handler: ${run.id}`,
 		`Exit: ${exit}`,
-		`Output: ${run.stdoutPath}`,
-		`Errors: ${run.stderrPath}`,
+		formatLogPath("Output", run.stdoutPath),
+		formatLogPath("Errors", run.stderrPath),
 		"",
 		truncateText(output, SUMMARY_LIMIT_BYTES),
 	].join("\n");
@@ -220,6 +256,8 @@ export async function deliverBackgroundForkEvent(
 				startedAt: Date.now(),
 				...(event.parentSessionFile ? { parentSessionFile: event.parentSessionFile } : {}),
 				...(event.parentIntercomTarget ? { parentIntercomTarget: event.parentIntercomTarget } : {}),
+				notify: resolved.notify,
+				triggerParentOnSummary: resolved.triggerParentOnSummary,
 			};
 		})();
 

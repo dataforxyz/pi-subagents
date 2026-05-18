@@ -71,10 +71,16 @@ export function cleanupOldArtifacts(dir: string, maxAgeDays: number): void {
 	fs.writeFileSync(markerPath, String(now));
 }
 
+function getPiAgentDir(): string {
+	return process.env.PI_CODING_AGENT_DIR
+		? path.resolve(process.env.PI_CODING_AGENT_DIR)
+		: path.join(os.homedir(), ".pi", "agent");
+}
+
 export function cleanupAllArtifactDirs(maxAgeDays: number): void {
 	cleanupOldArtifacts(TEMP_ARTIFACTS_DIR, maxAgeDays);
 
-	const sessionsBase = path.join(os.homedir(), ".pi", "agent", "sessions");
+	const sessionsBase = path.join(getPiAgentDir(), "sessions");
 	if (!fs.existsSync(sessionsBase)) return;
 
 	let dirs: string[];
