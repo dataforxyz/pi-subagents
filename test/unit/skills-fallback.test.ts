@@ -12,6 +12,7 @@ import {
 } from "../../src/agents/skills.ts";
 
 let tempDir = "";
+const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 function makeProjectSkill(cwd: string, name: string, body: string): void {
 	const skillDir = path.join(cwd, ".pi", "skills", name);
@@ -49,11 +50,14 @@ async function importSkillsFresh() {
 describe("skills filesystem fallback", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skills-fallback-"));
+		delete process.env.PI_CODING_AGENT_DIR;
 		clearSkillCache();
 	});
 
 	afterEach(() => {
 		clearSkillCache();
+		if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -89,6 +93,21 @@ describe("skills filesystem fallback", () => {
 		const { resolved, missing } = resolveSkills(["pi-subagents", "safe-bash"], tempDir);
 		assert.deepEqual(missing, ["pi-subagents"]);
 		assert.deepEqual(resolved.map((skill) => skill.name), ["safe-bash"]);
+	});
+
+	it("uses PI_CODING_AGENT_DIR for user skills and settings", () => {
+		const isolatedAgentDir = path.join(tempDir, "isolated-agent");
+		process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+		const skillDir = path.join(isolatedAgentDir, "skills", "isolated-user-skill");
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(path.join(skillDir, "SKILL.md"), "Use isolated user skill.\n", "utf-8");
+		fs.writeFileSync(path.join(isolatedAgentDir, "settings.json"), JSON.stringify({ skills: ["./extra-skill/SKILL.md"] }, null, 2), "utf-8");
+		fs.mkdirSync(path.join(isolatedAgentDir, "extra-skill"), { recursive: true });
+		fs.writeFileSync(path.join(isolatedAgentDir, "extra-skill", "SKILL.md"), "Use isolated settings skill.\n", "utf-8");
+
+		const available = discoverAvailableSkills(tempDir);
+		assert.equal(available.find((skill) => skill.name === "isolated-user-skill")?.source, "user");
+		assert.equal(available.find((skill) => skill.name === "extra-skill")?.source, "user-settings");
 	});
 
 	it("classifies package-provided skills as project-package", () => {
