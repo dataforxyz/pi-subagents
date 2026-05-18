@@ -783,7 +783,7 @@ After a worktree parallel step completes, per-agent diff stats are appended to t
 { "asyncByDefault": true }
 ```
 
-Makes top-level calls use background execution when the request does not explicitly set `async`. Callers can still force foreground with `async: false` unless `forceTopLevelAsync` is enabled.
+Makes top-level calls use background execution when the request does not explicitly set `async`. Callers can still force foreground with `async: false`.
 
 ### `forceTopLevelAsync`
 
@@ -791,7 +791,7 @@ Makes top-level calls use background execution when the request does not explici
 { "forceTopLevelAsync": true }
 ```
 
-Forces depth-0 single, parallel, and chain runs into background mode and bypasses clarify UI by forcing `clarify: false`. Nested calls keep their own inherited settings.
+Forces depth-0 single, parallel, and chain runs into background mode and bypasses clarify UI by forcing `clarify: false` when the request does not explicitly set `async`. Use `async: false` to opt a top-level call back into synchronous/foreground execution. Nested calls keep their own inherited settings.
 
 ### `parallel`
 
