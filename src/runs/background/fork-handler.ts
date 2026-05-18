@@ -75,7 +75,7 @@ function closeFdBestEffort(fd: number | undefined): void {
 export function resolveBackgroundForkHandlersConfig(config?: BackgroundForkHandlersConfig): ResolvedBackgroundForkHandlersConfig {
 	return {
 		enabled: config?.enabled ?? true,
-		notify: config?.notify ?? "ack-and-summary",
+		notify: config?.notify ?? "summary",
 		triggerParentOnSummary: config?.triggerParentOnSummary ?? false,
 		...(config?.piCommand ? { piCommand: config.piCommand } : {}),
 	};
