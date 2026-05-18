@@ -139,6 +139,17 @@ function packageHasPiExtension(packageRoot: string): boolean {
 	return fs.existsSync(path.join(packageRoot, "extensions"));
 }
 
+function packageJsonName(packageRoot: string): string | undefined {
+	const pkg = readJsonBestEffort(path.join(packageRoot, "package.json"));
+	if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return undefined;
+	const name = (pkg as { name?: unknown }).name;
+	return typeof name === "string" ? name : undefined;
+}
+
+function isPiIntercomPackageRoot(packageRoot: string): boolean {
+	return packageJsonName(packageRoot) === PI_INTERCOM_PACKAGE_NAME && packageHasPiExtension(packageRoot);
+}
+
 function isSafePackagePath(value: string): boolean {
 	return value.length > 0
 		&& !path.isAbsolute(value)
@@ -151,6 +162,66 @@ function parseNpmPackageName(source: string): string | undefined {
 	const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/);
 	const packageName = match?.[1] ?? spec;
 	return isSafePackagePath(packageName) ? packageName : undefined;
+}
+
+function stripGitRef(repoPath: string): string {
+	const atIndex = repoPath.indexOf("@");
+	const hashIndex = repoPath.indexOf("#");
+	const refIndex = [atIndex, hashIndex].filter((index) => index >= 0).sort((a, b) => a - b)[0];
+	return refIndex === undefined ? repoPath : repoPath.slice(0, refIndex);
+}
+
+function parseGitPackagePath(source: string): { host: string; repoPath: string } | undefined {
+	const spec = source.slice(4).trim();
+	if (!spec) return undefined;
+
+	let host = "";
+	let repoPath = "";
+	const scpLike = spec.match(/^git@([^:]+):(.+)$/);
+	if (scpLike) {
+		host = scpLike[1] ?? "";
+		repoPath = scpLike[2] ?? "";
+	} else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(spec)) {
+		try {
+			const url = new URL(spec);
+			host = url.hostname;
+			repoPath = url.pathname.replace(/^\/+/, "");
+		} catch {
+			return undefined;
+		}
+	} else {
+		const slashIndex = spec.indexOf("/");
+		if (slashIndex < 0) return undefined;
+		host = spec.slice(0, slashIndex);
+		repoPath = spec.slice(slashIndex + 1);
+	}
+
+	const normalizedPath = stripGitRef(repoPath).replace(/\.git$/, "").replace(/^\/+/, "");
+	if (!host || !isSafePackagePath(host) || !isSafePackagePath(normalizedPath) || normalizedPath.split(/[\\/]/).length < 2) {
+		return undefined;
+	}
+	return { host, repoPath: normalizedPath };
+}
+
+function resolveSettingsPackageRoot(source: string, baseDir: string): string | undefined {
+	const trimmed = source.trim();
+	if (!trimmed) return undefined;
+	if (trimmed.startsWith("git:")) {
+		const parsed = parseGitPackagePath(trimmed);
+		return parsed ? path.join(baseDir, "git", parsed.host, parsed.repoPath) : undefined;
+	}
+	if (trimmed.startsWith("npm:")) {
+		const packageName = parseNpmPackageName(trimmed);
+		return packageName ? path.join(baseDir, "npm", "node_modules", packageName) : undefined;
+	}
+	const normalized = trimmed.startsWith("file:") ? trimmed.slice(5) : trimmed;
+	if (normalized === "~") return os.homedir();
+	if (normalized.startsWith("~/")) return path.join(os.homedir(), normalized.slice(2));
+	if (path.isAbsolute(normalized)) return normalized;
+	if (normalized === "." || normalized === ".." || normalized.startsWith("./") || normalized.startsWith("../")) {
+		return path.resolve(baseDir, normalized);
+	}
+	return undefined;
 }
 
 function packageEntrySource(entry: unknown): string | undefined {
@@ -208,16 +279,22 @@ function configuredPiIntercomPackageDir(input: ResolveIntercomBridgeInput, agent
 		for (const entry of packages) {
 			if (!packageEntryAllowsExtensions(entry)) continue;
 			const source = packageEntrySource(entry)?.trim();
-			if (!source?.startsWith("npm:")) continue;
-			const packageName = parseNpmPackageName(source);
-			if (packageName !== PI_INTERCOM_PACKAGE_NAME) continue;
-			const candidates = scope === "project"
-				? [path.join(configDir, "npm", "node_modules", packageName)]
-				: [
-					...(globalNpmRoot ? [path.join(globalNpmRoot, packageName)] : []),
-					path.join(agentDir, "npm", "node_modules", packageName),
-				];
-			const packageRoot = candidates.find(packageHasPiExtension);
+			if (!source) continue;
+			const candidates: string[] = [];
+			if (source.startsWith("npm:")) {
+				const packageName = parseNpmPackageName(source);
+				if (packageName !== PI_INTERCOM_PACKAGE_NAME) continue;
+				candidates.push(...(scope === "project"
+					? [path.join(configDir, "npm", "node_modules", packageName)]
+					: [
+						...(globalNpmRoot ? [path.join(globalNpmRoot, packageName)] : []),
+						path.join(agentDir, "npm", "node_modules", packageName),
+					]));
+			} else {
+				const packageRoot = resolveSettingsPackageRoot(source, configDir);
+				if (packageRoot) candidates.push(packageRoot);
+			}
+			const packageRoot = candidates.find(isPiIntercomPackageRoot);
 			if (packageRoot) return path.resolve(packageRoot);
 		}
 	}
