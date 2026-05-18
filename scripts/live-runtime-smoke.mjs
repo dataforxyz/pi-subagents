@@ -64,6 +64,12 @@ function subagentToolResults(entries) {
 		.filter((message) => message?.role === "toolResult" && message.toolName === "subagent");
 }
 
+function resultContainsMarker(result, marker) {
+	if (result?.finalOutput === marker) return true;
+	const outputPath = result?.artifactPaths?.outputPath;
+	return typeof outputPath === "string" && existsSync(outputPath) && readFileSync(outputPath, "utf8").includes(marker);
+}
+
 function firstExistingPath(paths) {
 	return paths.find((candidate) => existsSync(candidate));
 }
@@ -114,7 +120,7 @@ try {
 
 	console.log(`Using isolated PI_CODING_AGENT_DIR=${agentDir}`);
 
-	const doctorPrompt = "Use the subagent tool with action doctor. Then summarize the package root, package git line, asyncByDefault, forceTopLevelAsync, and background fork handler notify value.";
+	const doctorPrompt = "Use the subagent tool with action doctor. Then summarize the package root, package git line, asyncByDefault, forceTopLevelAsync, background fork handler notify value, and intercom bridge status.";
 	const doctor = run(piCommand, [
 		"-p",
 		"--session-dir", sessionDir,
@@ -132,6 +138,7 @@ try {
 		"- asyncByDefault: true",
 		"- forceTopLevelAsync: true",
 		"notify=summary",
+		"- bridge: active",
 	]) {
 		if (!doctorText.includes(expected)) fail(`doctor output missing ${expected}`, { doctorText, stdout: doctor.stdout, session: doctorSession });
 	}
@@ -148,7 +155,7 @@ try {
 	if (sync.status !== 0) fail("sync Pi run failed", { stdout: sync.stdout, stderr: sync.stderr });
 	const syncSession = latestSessionFile(sessionDir);
 	const syncResults = subagentToolResults(readJsonl(syncSession));
-	const matching = syncResults.find((message) => message.details?.mode === "single" && message.details?.results?.some((result) => result.finalOutput === marker));
+	const matching = syncResults.find((message) => message.details?.mode === "single" && message.details?.results?.some((result) => resultContainsMarker(result, marker)));
 	if (!matching) {
 		fail("did not find synchronous single subagent result with expected marker", {
 			stdout: sync.stdout,
