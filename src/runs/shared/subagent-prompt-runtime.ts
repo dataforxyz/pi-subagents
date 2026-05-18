@@ -152,6 +152,16 @@ function compactHandlerReceiptMessage(message: unknown): unknown {
 	return content === m.content ? message : { ...m, content };
 }
 
+export function compactRoutineHandlerReceiptMessages(messages: unknown[]): unknown[] {
+	let changed = false;
+	const compacted = messages.map((message) => {
+		const next = compactHandlerReceiptMessage(message);
+		if (next !== message) changed = true;
+		return next;
+	});
+	return changed ? compacted : messages;
+}
+
 function isSubagentToolResultMessage(message: unknown): boolean {
 	const m = message as { role?: string; toolName?: string };
 	return m?.role === "toolResult" && m.toolName === "subagent";

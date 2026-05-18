@@ -34,6 +34,7 @@ import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDet
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import registerSubagentNotify, { type SubagentNotifyDetails } from "../runs/background/notify.ts";
 import { SUBAGENT_CHILD_ENV } from "../runs/shared/pi-args.ts";
+import { compactRoutineHandlerReceiptMessages } from "../runs/shared/subagent-prompt-runtime.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
 import {
 	type Details,
@@ -244,6 +245,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const asyncByDefault = config.asyncByDefault === true;
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
+
+	pi.on("context", (event) => {
+		const messages = compactRoutineHandlerReceiptMessages(event.messages);
+		if (messages === event.messages) return undefined;
+		return { messages };
+	});
 
 	const state: SubagentState = {
 		baseCwd: "",

@@ -3,6 +3,7 @@ import { afterEach, describe, it } from "node:test";
 import registerSubagentPromptRuntime, {
 	CHILD_SUBAGENT_BOUNDARY_INSTRUCTIONS,
 	SUBAGENT_INTERCOM_SESSION_NAME_ENV,
+	compactRoutineHandlerReceiptMessages,
 	rewriteSubagentPrompt,
 	stripInheritedSkills,
 	stripParentOnlySubagentMessages,
@@ -150,6 +151,20 @@ describe("subagent prompt runtime", () => {
 		assert.match(compacted.content, /DEMO_OK/);
 		assert.doesNotMatch(compacted.content, /NOISY LINE 4/);
 		assert.ok(compacted.content.length < handlerReceipt.content.length);
+	});
+
+	it("compacts routine handler receipts without stripping other parent messages", () => {
+		const notify = { role: "custom", customType: "subagent-notify", content: "keep in parent context" };
+		const handlerReceipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: "Background subagent event handler complete: delegate\nHandler: sbf_123\nExit: 0\nOutput: /tmp/out.log (10 B)\nErrors: none (/tmp/err.log, 0 B)\n\nRoutine summary.",
+		};
+
+		const result = compactRoutineHandlerReceiptMessages([notify, handlerReceipt]);
+		assert.equal(result[0], notify);
+		assert.match((result[1] as { content: string }).content, /compacted for child context/);
+		assert.match((result[1] as { content: string }).content, /Output: \/tmp\/out\.log/);
 	});
 
 	it("does not compact failed handler receipts", () => {
