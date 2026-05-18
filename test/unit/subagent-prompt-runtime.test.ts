@@ -153,6 +153,16 @@ describe("subagent prompt runtime", () => {
 		assert.ok(compacted.content.length < handlerReceipt.content.length);
 	});
 
+	it("does not compact handler receipts without a usable output log pointer", () => {
+		const receipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: "Background subagent event handler complete: delegate\nHandler: sbf_123\nExit: 0\nOutput: unavailable (/tmp/out.log, missing)\nErrors: none (/tmp/err.log, 0 B)\n\nSummary should stay inline because output is missing.",
+		};
+
+		assert.deepEqual(compactRoutineHandlerReceiptMessages([receipt]), [receipt]);
+	});
+
 	it("does not compact handler receipts with non-empty stderr", () => {
 		const receipt = {
 			role: "custom",
