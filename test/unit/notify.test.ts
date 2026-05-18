@@ -180,13 +180,12 @@ describe("registerSubagentNotify", () => {
 				timestamp: 456,
 			});
 
-			await waitForSent(sent, 2);
+			await waitForSent(sent, 1);
 			assert.equal(sent.some((entry) => (entry as any).options?.triggerTurn === true), false);
 			assert.equal((sent[0] as any).message.customType, "subagent-fork-handler");
-			assert.equal((sent[0] as any).message.details.status, "running");
-			assert.equal((sent[1] as any).message.details.status, "complete");
-			assert.match((sent[1] as any).message.content, /"PI_SUBAGENT_CHILD":"1"/);
-			assert.match((sent[1] as any).message.content, /"PI_SUBAGENT_BACKGROUND_HANDLER":"1"/);
+			assert.equal((sent[0] as any).message.details.status, "complete");
+			assert.match((sent[0] as any).message.content, /"PI_SUBAGENT_CHILD":"1"/);
+			assert.match((sent[0] as any).message.content, /"PI_SUBAGENT_BACKGROUND_HANDLER":"1"/);
 			const callFile = fs.readdirSync(mockPi.dir).find((name) => name.startsWith("call-"));
 			assert.ok(callFile, "mock pi was not called");
 			const call = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf8"));

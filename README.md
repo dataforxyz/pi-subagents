@@ -844,18 +844,18 @@ The default injected guidance tells children to use `contact_supervisor` with `r
 {
   "backgroundForkHandlers": {
     "enabled": true,
-    "notify": "ack-and-summary",
+    "notify": "summary",
     "triggerParentOnSummary": false
   }
 }
 ```
 
-Async subagent completions and async control notices default to a sibling Pi handler instead of triggering the active parent feed. Successful and failed per-step completion records are coalesced into the aggregate async completion handler to avoid duplicate step + final summaries; actionable in-progress problems should use control notices. The parent receives passive handler ack/summary messages only; set `triggerParentOnSummary: true` only when summaries should start a parent turn. Set `enabled: false` to opt out of sibling handling; fallback delivery is still display-only and does not trigger a parent turn.
+Async subagent completions and async control notices default to a sibling Pi handler instead of triggering the active parent feed. Successful and failed per-step completion records are coalesced into the aggregate async completion handler to avoid duplicate step + final summaries; actionable in-progress problems should use control notices. The parent receives passive handler summaries only by default; set `notify: "ack-and-summary"` if launch acknowledgements are also needed, and set `triggerParentOnSummary: true` only when summaries should start a parent turn. Set `enabled: false` to opt out of sibling handling; fallback delivery is still display-only and does not trigger a parent turn.
 
 Fields:
 
 - `enabled`: default `true`; route interrupting background notifications through a sibling handler.
-- `notify`: default `ack-and-summary`; accepts `ack-and-summary`, `summary`, or `none`.
+- `notify`: default `summary`; accepts `ack-and-summary`, `summary`, or `none`.
 - `triggerParentOnSummary`: default `false`; keep summaries display-only unless explicitly enabled.
 - `piCommand`: optional Pi executable override for tests or custom installs.
 

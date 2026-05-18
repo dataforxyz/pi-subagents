@@ -73,14 +73,14 @@ describe("subagent control notice delivery", () => {
 			});
 
 			const start = Date.now();
-			while (Date.now() - start < 2_000 && recorder.sent.length < 2) {
+			while (Date.now() - start < 2_000 && recorder.sent.length < 1) {
 				await wait(20);
 			}
-			assert.equal(recorder.sent.length, 2);
+			assert.equal(recorder.sent.length, 1);
 			assert.equal(recorder.sent.some((entry) => (entry as any).options?.triggerTurn === true), false);
 			assert.equal((recorder.sent[0] as any).message.customType, "subagent-fork-handler");
-			assert.equal((recorder.sent[1] as any).message.details.status, "complete");
-			assert.match(String((recorder.sent[1] as any).message.content), /control handled in fork/);
+			assert.equal((recorder.sent[0] as any).message.details.status, "complete");
+			assert.match(String((recorder.sent[0] as any).message.content), /control handled in fork/);
 		} finally {
 			mockPi.uninstall();
 		}
