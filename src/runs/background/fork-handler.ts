@@ -63,6 +63,22 @@ function truncateText(text: string, limitBytes: number): string {
 	return `${truncated}\n… truncated ${bytes - limitBytes} bytes`;
 }
 
+function fileSizeBytes(filePath: string): number | null {
+	try {
+		return fs.statSync(filePath).size;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
+}
+
+function formatLogPath(label: "Output" | "Errors", filePath: string): string {
+	const size = fileSizeBytes(filePath);
+	if (size === null) return `${label}: unavailable (${filePath}, missing)`;
+	if (label === "Errors" && size === 0) return `${label}: none (${filePath}, 0 B)`;
+	return `${label}: ${filePath} (${size} B)`;
+}
+
 function sanitizeSegment(value: string): string {
 	return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "event";
 }
@@ -177,8 +193,8 @@ function formatSummary(run: BackgroundForkRun, status: "complete" | "failed", co
 		`Background subagent event handler ${status}: ${run.title}`,
 		`Handler: ${run.id}`,
 		`Exit: ${exit}`,
-		`Output: ${run.stdoutPath}`,
-		`Errors: ${run.stderrPath}`,
+		formatLogPath("Output", run.stdoutPath),
+		formatLogPath("Errors", run.stderrPath),
 		"",
 		truncateText(output, SUMMARY_LIMIT_BYTES),
 	].join("\n");
