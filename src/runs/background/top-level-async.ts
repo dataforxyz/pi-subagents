@@ -9,5 +9,6 @@ export function applyForceTopLevelAsyncOverride<T extends AsyncOverrideParams>(
 	forceTopLevelAsync: boolean,
 ): T {
 	if (!(depth === 0 && forceTopLevelAsync)) return params;
+	if (params.async === false) return params;
 	return { ...params, async: true, clarify: false };
 }
