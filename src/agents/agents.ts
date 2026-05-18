@@ -130,8 +130,14 @@ interface AgentDiscoveryResult {
 	projectAgentsDir: string | null;
 }
 
+function getUserAgentDir(): string {
+	return process.env.PI_CODING_AGENT_DIR
+		? path.resolve(process.env.PI_CODING_AGENT_DIR)
+		: path.join(os.homedir(), ".pi", "agent");
+}
+
 function getUserChainDir(): string {
-	return path.join(os.homedir(), ".pi", "agent", "chains");
+	return path.join(getUserAgentDir(), "chains");
 }
 
 function splitToolList(rawTools: string[] | undefined): { tools?: string[]; mcpDirectTools?: string[] } {
@@ -217,7 +223,7 @@ function findNearestProjectRoot(cwd: string): string | null {
 }
 
 function getUserAgentSettingsPath(): string {
-	return path.join(os.homedir(), ".pi", "agent", "settings.json");
+	return path.join(getUserAgentDir(), "settings.json");
 }
 
 function getProjectAgentSettingsPath(cwd: string): string | null {
@@ -723,7 +729,7 @@ function resolveNearestProjectChainDirs(cwd: string): { readDirs: string[]; pref
 const BUILTIN_AGENTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "agents");
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
-	const userDirOld = path.join(os.homedir(), ".pi", "agent", "agents");
+	const userDirOld = path.join(getUserAgentDir(), "agents");
 	const userDirNew = path.join(os.homedir(), ".agents");
 	const { readDirs: projectAgentDirs, preferredDir: projectAgentsDir } = resolveNearestProjectAgentDirs(cwd);
 	const userSettingsPath = getUserAgentSettingsPath();
@@ -762,7 +768,7 @@ export function discoverAgentsAll(cwd: string): {
 	userSettingsPath: string;
 	projectSettingsPath: string | null;
 } {
-	const userDirOld = path.join(os.homedir(), ".pi", "agent", "agents");
+	const userDirOld = path.join(getUserAgentDir(), "agents");
 	const userDirNew = path.join(os.homedir(), ".agents");
 	const userChainDir = getUserChainDir();
 	const { readDirs: projectDirs, preferredDir: projectDir } = resolveNearestProjectAgentDirs(cwd);

@@ -139,6 +139,29 @@ describe("diagnoseIntercomBridge", () => {
 		});
 	});
 
+	it("uses PI_CODING_AGENT_DIR when no explicit agentDir is supplied", () => {
+		withPackagedIntercom(({ agentDir, cwd, globalNpmRoot, packageDir, configPath }) => {
+			const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			try {
+				const diagnostic = diagnoseIntercomBridge({
+					config: { mode: "always" },
+					context: "fresh",
+					orchestratorTarget: "main",
+					cwd,
+					globalNpmRoot,
+					configPath,
+				});
+				assert.equal(diagnostic.active, true);
+				assert.equal(diagnostic.piIntercomAvailable, true);
+				assert.equal(diagnostic.extensionDir, path.resolve(packageDir));
+			} finally {
+				if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
+			}
+		});
+	});
+
 	it("preserves malformed intercom config errors while matching runtime enabled behavior", () => {
 		withMalformedIntercomConfig(({ extensionDir, configPath }) => {
 			const diagnostic = diagnoseIntercomBridge({

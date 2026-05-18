@@ -9,6 +9,7 @@ let tempHome = "";
 let tempProject = "";
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
+const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 function writeJson(filePath: string, value: unknown): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -27,6 +28,7 @@ describe("builtin agent overrides", () => {
 		tempProject = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-project-"));
 		process.env.HOME = tempHome;
 		process.env.USERPROFILE = tempHome;
+		delete process.env.PI_CODING_AGENT_DIR;
 	});
 
 	afterEach(() => {
@@ -34,6 +36,8 @@ describe("builtin agent overrides", () => {
 		else process.env.HOME = originalHome;
 		if (originalUserProfile === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = originalUserProfile;
+		if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
 		fs.rmSync(tempHome, { recursive: true, force: true });
 		fs.rmSync(tempProject, { recursive: true, force: true });
 	});
@@ -74,6 +78,22 @@ describe("builtin agent overrides", () => {
 		assert.equal(reviewer.inheritSkills, true);
 		assert.equal(reviewer.override?.scope, "user");
 		assert.equal(reviewer.override?.path, path.join(tempHome, ".pi", "agent", "settings.json"));
+	});
+
+	it("uses PI_CODING_AGENT_DIR for user settings overrides", () => {
+		const isolatedAgentDir = path.join(tempProject, "isolated-agent-dir");
+		process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: { agentOverrides: { reviewer: { model: "wrong-home-model" } } },
+		});
+		writeJson(path.join(isolatedAgentDir, "settings.json"), {
+			subagents: { agentOverrides: { reviewer: { model: "isolated-model" } } },
+		});
+
+		const reviewer = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "reviewer");
+		assert.ok(reviewer);
+		assert.equal(reviewer.model, "isolated-model");
+		assert.equal(reviewer.override?.path, path.join(isolatedAgentDir, "settings.json"));
 	});
 
 	it("prefers project settings overrides over user settings overrides", () => {

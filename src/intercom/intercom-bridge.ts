@@ -9,7 +9,9 @@ const PI_INTERCOM_PACKAGE_NAME = "pi-intercom";
 const CONFIG_DIR = ".pi";
 
 function defaultAgentDir(): string {
-	return path.join(os.homedir(), ".pi", "agent");
+	return process.env.PI_CODING_AGENT_DIR
+		? path.resolve(process.env.PI_CODING_AGENT_DIR)
+		: path.join(os.homedir(), ".pi", "agent");
 }
 
 function defaultIntercomExtensionDir(agentDir = defaultAgentDir()): string {

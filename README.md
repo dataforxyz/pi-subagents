@@ -769,7 +769,7 @@ After a worktree parallel step completes, per-agent diff stats are appended to t
 
 ## Configuration
 
-`pi-subagents` reads optional JSON config from `~/.pi/agent/extensions/subagent/config.json`.
+`pi-subagents` reads optional JSON config from `$PI_CODING_AGENT_DIR/extensions/subagent/config.json` when `PI_CODING_AGENT_DIR` is set, otherwise from `~/.pi/agent/extensions/subagent/config.json`. User-scope agents, chains, skills, settings, intercom bridge config discovery, and session artifact cleanup use the same agent directory so isolated live tests do not read or clean the real `~/.pi/agent` tree.
 
 ### `asyncByDefault`
 
