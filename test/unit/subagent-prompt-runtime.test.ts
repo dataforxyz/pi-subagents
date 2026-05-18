@@ -153,6 +153,16 @@ describe("subagent prompt runtime", () => {
 		assert.ok(compacted.content.length < handlerReceipt.content.length);
 	});
 
+	it("does not compact handler receipts with non-empty stderr", () => {
+		const receipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: "Background subagent event handler complete: delegate\nHandler: sbf_123\nExit: 0\nOutput: /tmp/out.log (10 B)\nErrors: /tmp/err.log (42 B)\n\nWarning details should stay inline.",
+		};
+
+		assert.deepEqual(compactRoutineHandlerReceiptMessages([receipt]), [receipt]);
+	});
+
 	it("does not recompact already compacted handler receipts", () => {
 		const compactedReceipt = {
 			role: "custom",
