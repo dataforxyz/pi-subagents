@@ -1,8 +1,6 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { buildForkHandlerEnv, buildForkRunPaths, getForkHandlersFile, getForkStateDir, launchDetachedFork } from "../../shared/fork-runtime.ts";
 import { SUBAGENT_CHILD_ENV } from "../shared/pi-args.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import type { BackgroundForkHandlersConfig } from "../../shared/types.ts";
@@ -39,12 +37,24 @@ interface BackgroundForkRun {
 	sessionDir: string;
 	parentSessionFile?: string;
 	parentIntercomTarget?: string;
+	status?: "starting" | "running" | "complete" | "failed";
+	startedAt?: number;
+	endedAt?: number;
+	exitCode?: number | null;
+	signal?: NodeJS.Signals | null;
+	error?: string;
 	pid?: number;
 }
 
-const STATE_DIR = path.join(os.homedir(), ".local", "state", "pi-subagents");
-const HANDLERS_DIR = path.join(STATE_DIR, "handlers");
+interface BackgroundForkRunsState {
+	version: 1;
+	handlers: BackgroundForkRun[];
+}
+
+const STATE_DIR = getForkStateDir("subagents");
+const HANDLERS_FILE = getForkHandlersFile("subagents");
 const SUMMARY_LIMIT_BYTES = 16 * 1024;
+const MAX_PERSISTED_HANDLERS = 200;
 
 function truncateText(text: string, limitBytes: number): string {
 	const bytes = Buffer.byteLength(text, "utf8");
@@ -61,13 +71,37 @@ function makeRunId(event: SubagentBackgroundForkEvent): string {
 	return `sbf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${sanitizeSegment(event.type)}`;
 }
 
-function closeFdBestEffort(fd: number | undefined): void {
-	if (fd === undefined) return;
+async function readPersistedRuns(): Promise<BackgroundForkRun[]> {
 	try {
-		fs.closeSync(fd);
-	} catch {
-		// Best effort cleanup; the child owns duplicated stdio fds after spawn succeeds.
+		const raw = await fs.promises.readFile(HANDLERS_FILE, "utf8");
+		const parsed = JSON.parse(raw) as Partial<BackgroundForkRunsState>;
+		return Array.isArray(parsed.handlers) ? parsed.handlers : [];
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		return [];
 	}
+}
+
+async function writePersistedRuns(runs: BackgroundForkRun[]): Promise<void> {
+	await fs.promises.mkdir(STATE_DIR, { recursive: true });
+	const tmp = `${HANDLERS_FILE}.${process.pid}.${Date.now()}.tmp`;
+	const state: BackgroundForkRunsState = { version: 1, handlers: runs.slice(-MAX_PERSISTED_HANDLERS) };
+	await fs.promises.writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+	await fs.promises.rename(tmp, HANDLERS_FILE);
+}
+
+async function persistRun(run: BackgroundForkRun): Promise<void> {
+	const runs = await readPersistedRuns();
+	const next = [...runs.filter((candidate) => candidate.id !== run.id), run];
+	await writePersistedRuns(next);
+}
+
+async function patchPersistedRun(id: string, patch: Partial<BackgroundForkRun>): Promise<void> {
+	const runs = await readPersistedRuns();
+	const index = runs.findIndex((candidate) => candidate.id === id);
+	if (index === -1) return;
+	runs[index] = { ...runs[index]!, ...patch };
+	await writePersistedRuns(runs);
 }
 
 export function resolveBackgroundForkHandlersConfig(config?: BackgroundForkHandlersConfig): ResolvedBackgroundForkHandlersConfig {
@@ -173,23 +207,17 @@ export async function deliverBackgroundForkEvent(
 		return;
 	}
 
-	let stdoutFd: number | undefined;
-	let stderrFd: number | undefined;
+	let run: BackgroundForkRun | undefined;
 	try {
-		const run: BackgroundForkRun = (() => {
+		run = (() => {
 			const id = makeRunId(event);
-			const dir = path.join(HANDLERS_DIR, id);
 			return {
-				id,
+				...buildForkRunPaths("subagents", id),
 				type: event.type,
 				title: event.title,
 				cwd: event.cwd ?? process.cwd(),
-				dir,
-				eventPath: path.join(dir, "event.json"),
-				promptPath: path.join(dir, "prompt.md"),
-				stdoutPath: path.join(dir, "stdout.log"),
-				stderrPath: path.join(dir, "stderr.log"),
-				sessionDir: path.join(dir, "sessions"),
+				status: "starting",
+				startedAt: Date.now(),
 				...(event.parentSessionFile ? { parentSessionFile: event.parentSessionFile } : {}),
 				...(event.parentIntercomTarget ? { parentIntercomTarget: event.parentIntercomTarget } : {}),
 			};
@@ -198,6 +226,7 @@ export async function deliverBackgroundForkEvent(
 		await fs.promises.mkdir(run.sessionDir, { recursive: true });
 		await fs.promises.writeFile(run.eventPath, `${JSON.stringify(event, null, 2)}\n`, "utf8");
 		await fs.promises.writeFile(run.promptPath, buildPrompt(event, run), "utf8");
+		await persistRun(run);
 
 		const baseArgs = [
 			"-p",
@@ -209,62 +238,43 @@ export async function deliverBackgroundForkEvent(
 			`@${run.promptPath}`,
 		];
 		const command = resolved.piCommand ? { command: resolved.piCommand, args: baseArgs } : getPiSpawnCommand(baseArgs);
-		stdoutFd = fs.openSync(run.stdoutPath, "a");
-		stderrFd = fs.openSync(run.stderrPath, "a");
-		const child = spawn(command.command, command.args, {
+		const launch = await launchDetachedFork({
+			command: command.command,
+			args: command.args,
 			cwd: run.cwd,
-			detached: true,
-			env: {
-				...process.env,
-				[SUBAGENT_CHILD_ENV]: "1",
-				PI_SUBAGENT_BACKGROUND_HANDLER: "1",
-				PI_SUBAGENT_BACKGROUND_HANDLER_RUN_ID: run.id,
+			stdoutPath: run.stdoutPath,
+			stderrPath: run.stderrPath,
+			env: buildForkHandlerEnv("subagents", run.id, { ...process.env, [SUBAGENT_CHILD_ENV]: "1" }),
+			onClose: (code, signal) => {
+				const status = code === 0 ? "complete" : "failed";
+				void patchPersistedRun(run!.id, { status, endedAt: Date.now(), exitCode: code, signal }).catch((error) => {
+					console.error("[pi-subagents] Failed to persist background fork handler completion:", error);
+				});
+				if (resolved.notify !== "summary" && resolved.notify !== "ack-and-summary") return;
+				pi.sendMessage(
+					{ customType: "subagent-fork-handler", content: formatSummary(run!, status, code, signal), display: true, details: { id: run!.id, type: run!.type, status, dir: run!.dir, pid: run!.pid, exitCode: code, signal } },
+					{ triggerTurn: resolved.triggerParentOnSummary },
+				);
 			},
-			stdio: ["ignore", stdoutFd, stderrFd],
 		});
-		closeFdBestEffort(stdoutFd);
-		closeFdBestEffort(stderrFd);
-		stdoutFd = undefined;
-		stderrFd = undefined;
-		child.unref();
-
-		let launchError: unknown;
-		const spawned = await new Promise<boolean>((resolve) => {
-			const onSpawn = () => {
-				child.off("error", onError);
-				resolve(true);
-			};
-			const onError = (error: Error) => {
-				launchError = error;
-				child.off("spawn", onSpawn);
-				resolve(false);
-			};
-			child.once("spawn", onSpawn);
-			child.once("error", onError);
-		});
-		if (!spawned) {
-			console.error("[pi-subagents] Failed to launch background fork handler:", launchError);
+		if (!launch.ok) {
+			const message = launch.error instanceof Error ? launch.error.message : String(launch.error);
+			await patchPersistedRun(run.id, { status: "failed", endedAt: Date.now(), error: message });
+			console.error("[pi-subagents] Failed to launch background fork handler:", launch.error);
 			sendFallback(pi, event);
 			return;
 		}
-		run.pid = child.pid;
+		run.pid = launch.pid;
+		run.status = "running";
+		await patchPersistedRun(run.id, { pid: launch.pid, status: "running" });
 		if (resolved.notify === "ack-and-summary") {
 			pi.sendMessage(
 				{ customType: "subagent-fork-handler", content: formatAck(run), display: true, details: { id: run.id, type: run.type, status: "running", dir: run.dir, pid: run.pid } },
 				{ triggerTurn: false },
 			);
 		}
-		child.once("close", (code, signal) => {
-			if (resolved.notify !== "summary" && resolved.notify !== "ack-and-summary") return;
-			const status = code === 0 ? "complete" : "failed";
-			pi.sendMessage(
-				{ customType: "subagent-fork-handler", content: formatSummary(run, status, code, signal), display: true, details: { id: run.id, type: run.type, status, dir: run.dir, pid: run.pid, exitCode: code, signal } },
-				{ triggerTurn: resolved.triggerParentOnSummary },
-			);
-		});
 	} catch (error) {
-		closeFdBestEffort(stdoutFd);
-		closeFdBestEffort(stderrFd);
+		if (run) await patchPersistedRun(run.id, { status: "failed", endedAt: Date.now(), error: error instanceof Error ? error.message : String(error) });
 		console.error("[pi-subagents] Failed to start background fork handler:", error);
 		sendFallback(pi, event);
 	}

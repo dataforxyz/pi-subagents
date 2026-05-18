@@ -56,9 +56,13 @@
     "@mariozechner/pi-agent-core": "*",
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*"
+    "@mariozechner/pi-tui": "*",
+    "pi-forks": "^0.1.0"
   },
   "peerDependenciesMeta": {
+    "pi-forks": {
+      "optional": true
+    },
     "@mariozechner/pi-agent-core": {
       "optional": true
     },
