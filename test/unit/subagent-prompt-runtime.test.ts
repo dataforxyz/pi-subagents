@@ -121,6 +121,47 @@ describe("subagent prompt runtime", () => {
 		assert.deepEqual(stripParentOnlySubagentMessages([user, instruction, slashResult, notify, control, otherCustom]), [user, otherCustom]);
 	});
 
+	it("compacts routine handler receipts for child context while preserving lookup pointers", () => {
+		const handlerReceipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: [
+				"Background subagent event handler complete: delegate",
+				"Handler: sbf_123",
+				"Exit: 0",
+				"Output: /tmp/pi-subagents/run/stdout.log (12000 B)",
+				"Errors: none (/tmp/pi-subagents/run/stderr.log, 0 B)",
+				"",
+				"Routine success summary with useful marker DEMO_OK.",
+				`NOISY LINE 1 ${"x".repeat(500)}`,
+				`NOISY LINE 2 ${"x".repeat(500)}`,
+				`NOISY LINE 3 ${"x".repeat(500)}`,
+				`NOISY LINE 4 ${"x".repeat(500)}`,
+			].join("\n"),
+		};
+
+		const result = stripParentOnlySubagentMessages([handlerReceipt]);
+		assert.equal(result.length, 1);
+		const compacted = result[0] as { content: string };
+		assert.match(compacted.content, /compacted for child context/);
+		assert.match(compacted.content, /Handler: sbf_123/);
+		assert.match(compacted.content, /Output: \/tmp\/pi-subagents\/run\/stdout\.log \(12000 B\)/);
+		assert.match(compacted.content, /Errors: none/);
+		assert.match(compacted.content, /DEMO_OK/);
+		assert.doesNotMatch(compacted.content, /NOISY LINE 4/);
+		assert.ok(compacted.content.length < handlerReceipt.content.length);
+	});
+
+	it("does not compact failed handler receipts", () => {
+		const failedReceipt = {
+			role: "custom",
+			customType: "return-on-handler",
+			content: "return_on handler failed: build\nHandler: roh_123\nExit: 1\nOutput: /tmp/out.log (10 B)\n\nFailure detail that should stay inline.",
+		};
+
+		assert.deepEqual(stripParentOnlySubagentMessages([failedReceipt]), [failedReceipt]);
+	});
+
 	it("strips prior parent subagent tool calls and results from forked child context", () => {
 		const user = { role: "user", content: "Task" };
 		const subagentResult = { role: "toolResult", toolName: "subagent", content: "subagent results" };

@@ -20,6 +20,21 @@ const PARENT_ONLY_CUSTOM_MESSAGE_TYPES = new Set([
 	"subagent-control",
 	"subagent-control-notice",
 ]);
+const COMPACT_HANDLER_RECEIPT_CUSTOM_MESSAGE_TYPES = new Set([
+	"subagent-fork-handler",
+	"return-on-handler",
+	"intercom_fork_handler",
+]);
+const HANDLER_RECEIPT_METADATA_PREFIXES = [
+	"Background subagent event handler ",
+	"return_on handler ",
+	"intercom fork handler ",
+	"Handler:",
+	"Exit:",
+	"Output:",
+	"Errors:",
+	"Handler dir:",
+];
 const SUBAGENT_ORCHESTRATION_SKILL_NAME_PATTERN = /<name>\s*pi-subagents\s*<\/name>/;
 const PROJECT_CONTEXT_HEADER = "\n\n# Project Context\n\nProject-specific instructions and guidelines:\n\n";
 const SKILLS_HEADER = "\n\nThe following skills provide specialized instructions for specific tasks.";
@@ -86,6 +101,57 @@ function isParentOnlySubagentMessage(message: unknown): boolean {
 		&& PARENT_ONLY_CUSTOM_MESSAGE_TYPES.has(m.customType);
 }
 
+function isRoutineSuccessfulHandlerReceipt(content: string): boolean {
+	const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+	const firstLine = lines[0] ?? "";
+	if (!/\b(complete|completed)\b/i.test(firstLine)) return false;
+	if (/\b(failed|blocked|needs? attention|error)\b/i.test(firstLine)) return false;
+	const exitLine = lines.find((line) => /^Exit:/i.test(line));
+	return !exitLine || /^Exit:\s*0\b/i.test(exitLine);
+}
+
+function truncateReceiptLine(line: string, maxChars: number): string {
+	return line.length <= maxChars ? line : `${line.slice(0, maxChars)}…`;
+}
+
+function isHandlerReceiptMetadataLine(line: string): boolean {
+	const lower = line.toLowerCase();
+	return HANDLER_RECEIPT_METADATA_PREFIXES.some((prefix) => lower.startsWith(prefix.toLowerCase()));
+}
+
+function compactHandlerReceiptContent(content: string): string {
+	if (!isRoutineSuccessfulHandlerReceipt(content)) return content;
+	const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+	const kept: string[] = ["Parent handler receipt (compacted for child context; routine success)."];
+	const keptIndexes = new Set<number>();
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index]!;
+		if (!isHandlerReceiptMetadataLine(line)) continue;
+		kept.push(truncateReceiptLine(line, 320));
+		keptIndexes.add(index);
+	}
+	let summaryCount = 0;
+	for (let index = 0; index < lines.length && summaryCount < 3; index++) {
+		if (keptIndexes.has(index)) continue;
+		const line = lines[index]!;
+		if (isHandlerReceiptMetadataLine(line)) continue;
+		kept.push(`Summary: ${truncateReceiptLine(line, 240)}`);
+		keptIndexes.add(index);
+		summaryCount++;
+	}
+	const omitted = lines.length - keptIndexes.size;
+	if (omitted > 0) kept.push(`Omitted ${omitted} routine line(s); use Output/Errors paths for full logs if needed.`);
+	return kept.join("\n");
+}
+
+function compactHandlerReceiptMessage(message: unknown): unknown {
+	const m = message as { role?: string; customType?: string; content?: unknown };
+	if (m?.role !== "custom" || typeof m.customType !== "string" || !COMPACT_HANDLER_RECEIPT_CUSTOM_MESSAGE_TYPES.has(m.customType)) return message;
+	if (typeof m.content !== "string") return message;
+	const content = compactHandlerReceiptContent(m.content);
+	return content === m.content ? message : { ...m, content };
+}
+
 function isSubagentToolResultMessage(message: unknown): boolean {
 	const m = message as { role?: string; toolName?: string };
 	return m?.role === "toolResult" && m.toolName === "subagent";
@@ -118,8 +184,9 @@ export function stripParentOnlySubagentMessages(messages: unknown[]): unknown[] 
 			changed = true;
 			continue;
 		}
-		if (stripped !== message) changed = true;
-		filtered.push(stripped);
+		const compacted = compactHandlerReceiptMessage(stripped);
+		if (stripped !== message || compacted !== stripped) changed = true;
+		filtered.push(compacted);
 	}
 	return changed ? filtered : messages;
 }
