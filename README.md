@@ -993,7 +993,7 @@ When testing a local worktree through Pi package settings, run:
 npm run smoke:live
 ```
 
-The smoke test starts fresh `pi -p` sessions, verifies `subagent doctor` reports this package root plus key config values, and confirms an explicit `async:false` delegate call returns synchronously instead of being forced into an async run. Use `-- --keep` to keep the temporary session directory for inspection.
+The smoke test starts fresh `pi -p` sessions with an isolated temporary `PI_CODING_AGENT_DIR`, writes test-only settings/config under that temp directory, verifies `subagent doctor` reports this package root plus key config values, and confirms an explicit `async:false` delegate call returns synchronously instead of being forced into an async run. Use `-- --keep` to keep the temporary agent/session directories for inspection.
 
 ## Runtime files
 
