@@ -153,6 +153,16 @@ describe("subagent prompt runtime", () => {
 		assert.ok(compacted.content.length < handlerReceipt.content.length);
 	});
 
+	it("does not recompact already compacted handler receipts", () => {
+		const compactedReceipt = {
+			role: "custom",
+			customType: "return-on-handler",
+			content: "return_on handler receipt (compacted for model context; routine success).\nHandler: roh_123\nOutput: /tmp/out.log (10 B)",
+		};
+
+		assert.deepEqual(compactRoutineHandlerReceiptMessages([compactedReceipt]), [compactedReceipt]);
+	});
+
 	it("compacts routine handler receipts without stripping other parent messages", () => {
 		const notify = { role: "custom", customType: "subagent-notify", content: "keep in parent context" };
 		const handlerReceipt = {
