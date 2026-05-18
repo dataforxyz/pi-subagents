@@ -43,6 +43,8 @@ interface BackgroundForkRun {
 	exitCode?: number | null;
 	signal?: NodeJS.Signals | null;
 	error?: string;
+	notify: BackgroundForkHandlerNotify;
+	triggerParentOnSummary: boolean;
 	pid?: number;
 }
 
@@ -129,6 +131,21 @@ export function resolveBackgroundForkHandlersConfig(config?: BackgroundForkHandl
 	};
 }
 
+function parentNotificationModeLines(run: BackgroundForkRun): string[] {
+	if (run.notify === "none") {
+		return [
+			"Parent notification mode: none",
+			"Your final response is stored in handler logs only and will not be automatically posted to the parent transcript/context.",
+		];
+	}
+	return [
+		`Parent notification mode: ${run.notify}`,
+		`Your final response WILL be copied into the parent transcript/context${run.triggerParentOnSummary ? " and will trigger a parent turn" : ""}.`,
+		...(run.notify === "ack-and-summary" ? ["The parent already received a launch ack; do not repeat startup details unless relevant."] : []),
+		"Keep the final response concise. If you already sent an intercom message to the parent, do not repeat its full content; just note that you escalated it.",
+	];
+}
+
 function buildSystemPrompt(run: BackgroundForkRun): string {
 	return [
 		"You are a background pi-subagents event handler in a sibling Pi process.",
@@ -140,6 +157,7 @@ function buildSystemPrompt(run: BackgroundForkRun): string {
 		"Use intercom({ action: \"send\", to: <parent>, message: ... }) for required actionable non-blocking parent notices; use intercom.ask only for true blocking decisions.",
 		"Escalate only for destructive actions, ambiguous user preference, external side effects, security/privacy/cost risk, conflict with current parent work, or low confidence.",
 		...(run.parentIntercomTarget ? [`Parent intercom target: ${run.parentIntercomTarget}`] : []),
+		...parentNotificationModeLines(run),
 		`Handler id: ${run.id}`,
 	].join("\n");
 }
@@ -163,6 +181,8 @@ function buildPrompt(event: SubagentBackgroundForkEvent, run: BackgroundForkRun)
 		"```",
 		"",
 		"## Instructions",
+		"",
+		...parentNotificationModeLines(run),
 		"",
 		"Handle this background event without waking the parent feed for routine summaries. If the event includes a child session or artifact path, read it only when it helps triage accurately.",
 		"Do safe checks in this fork. If your conclusion is routine success, optional follow-up, or no action needed, do not send an intercom message to the parent; just state that in your final summary.",
@@ -236,6 +256,8 @@ export async function deliverBackgroundForkEvent(
 				startedAt: Date.now(),
 				...(event.parentSessionFile ? { parentSessionFile: event.parentSessionFile } : {}),
 				...(event.parentIntercomTarget ? { parentIntercomTarget: event.parentIntercomTarget } : {}),
+				notify: resolved.notify,
+				triggerParentOnSummary: resolved.triggerParentOnSummary,
 			};
 		})();
 
