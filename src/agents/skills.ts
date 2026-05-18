@@ -58,6 +58,12 @@ function getAgentDir(): string {
 		: path.join(os.homedir(), ".pi", "agent");
 }
 
+function getLegacyUserAgentsDir(): string | null {
+	return process.env.PI_CODING_AGENT_DIR
+		? null
+		: path.join(os.homedir(), ".agents");
+}
+
 const SOURCE_PRIORITY: Record<SkillSource, number> = {
 	project: 700,
 	"project-settings": 650,
@@ -325,11 +331,15 @@ function collectSettingsPackageSkillPaths(cwd: string): SkillSearchPath[] {
 
 function buildSkillPaths(cwd: string): SkillSearchPath[] {
 	const agentDir = getAgentDir();
+	const legacyUserAgentsDir = getLegacyUserAgentsDir();
+	const legacyUserSkillPaths: SkillSearchPath[] = legacyUserAgentsDir
+		? [{ path: path.join(legacyUserAgentsDir, "skills"), source: "user" }]
+		: [];
 	const skillPaths: SkillSearchPath[] = [
 		{ path: path.join(cwd, CONFIG_DIR, "skills"), source: "project" },
 		{ path: path.join(cwd, ".agents", "skills"), source: "project" },
 		{ path: path.join(agentDir, "skills"), source: "user" },
-		{ path: path.join(os.homedir(), ".agents", "skills"), source: "user" },
+		...legacyUserSkillPaths,
 		...collectInstalledPackageSkillPaths(cwd),
 		...collectSettingsPackageSkillPaths(cwd),
 		...extractSkillPathsFromPackageRoot(cwd, "project-package"),
@@ -356,14 +366,15 @@ function inferSkillSource(filePath: string, cwd: string, sourceHint?: SkillSourc
 	const projectAgentsRoot = path.resolve(cwd, ".agents");
 	const userSkillsRoot = path.resolve(agentDir, "skills");
 	const userPackagesRoot = path.resolve(agentDir, "npm", "node_modules");
-	const userAgentsRoot = path.resolve(os.homedir(), ".agents");
+	const legacyUserAgentsDir = getLegacyUserAgentsDir();
+	const userAgentsRoot = legacyUserAgentsDir ? path.resolve(legacyUserAgentsDir) : null;
 
 	if (isWithinPath(filePath, projectPackagesRoot)) return "project-package";
 	if (isWithinPath(filePath, projectSkillsRoot) || isWithinPath(filePath, projectAgentsRoot)) return "project";
 	if (isWithinPath(filePath, projectConfigRoot)) return "project-settings";
 
 	if (isWithinPath(filePath, userPackagesRoot)) return "user-package";
-	if (isWithinPath(filePath, userSkillsRoot) || isWithinPath(filePath, userAgentsRoot)) return "user";
+	if (isWithinPath(filePath, userSkillsRoot) || (userAgentsRoot && isWithinPath(filePath, userAgentsRoot))) return "user";
 	if (isWithinPath(filePath, agentDir)) return "user-settings";
 
 	const globalRoot = getGlobalNpmRoot();

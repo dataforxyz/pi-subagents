@@ -96,6 +96,19 @@ describe("builtin agent overrides", () => {
 		assert.equal(reviewer.override?.path, path.join(isolatedAgentDir, "settings.json"));
 	});
 
+	it("does not read legacy ~/.agents while PI_CODING_AGENT_DIR is set", () => {
+		const isolatedAgentDir = path.join(tempProject, "isolated-agent-dir");
+		process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+		fs.mkdirSync(path.join(isolatedAgentDir, "agents"), { recursive: true });
+		fs.writeFileSync(path.join(isolatedAgentDir, "agents", "isolated.md"), "---\nname: isolated\ndescription: Isolated agent\n---\n\nUse isolated agent.\n", "utf-8");
+		fs.mkdirSync(path.join(tempHome, ".agents"), { recursive: true });
+		fs.writeFileSync(path.join(tempHome, ".agents", "leaked.md"), "---\nname: leaked\ndescription: Legacy leaked agent\n---\n\nShould not leak.\n", "utf-8");
+
+		const userAgents = discoverAgentsAll(tempProject).user.map((agent) => agent.name);
+		assert.equal(userAgents.includes("isolated"), true);
+		assert.equal(userAgents.includes("leaked"), false);
+	});
+
 	it("prefers project settings overrides over user settings overrides", () => {
 		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {

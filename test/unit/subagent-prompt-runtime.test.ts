@@ -186,11 +186,35 @@ describe("subagent prompt runtime", () => {
 				"Routine line one.",
 				"Routine line two.",
 				"Routine line three.",
-				"BLOCKED: needs parent decision before continuing.",
+				"PARENT-DECISION: choose whether to continue.",
 			].join("\n"),
 		};
 
 		assert.deepEqual(compactRoutineHandlerReceiptMessages([receipt]), [receipt]);
+	});
+
+	it("preserves long handler log lookup pointers without truncation", () => {
+		const longOutput = `/tmp/${"a".repeat(350)}/stdout.log`;
+		const longErrors = `/tmp/${"b".repeat(350)}/stderr.log`;
+		const receipt = {
+			role: "custom",
+			customType: "subagent-fork-handler",
+			content: [
+				"Background subagent event handler complete: delegate",
+				"Handler: sbf_123",
+				"Exit: 0",
+				`Output: ${longOutput} (10 B)`,
+				`Errors: none (${longErrors}, 0 B)`,
+				"Routine summary.",
+			].join("\n"),
+		};
+
+		const result = compactRoutineHandlerReceiptMessages([receipt]);
+		const compacted = result[0] as { content: string };
+		assert.match(compacted.content, /compacted for child context/);
+		assert.match(compacted.content, new RegExp(`Output: ${longOutput.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(10 B\\)`));
+		assert.match(compacted.content, new RegExp(`Errors: none \\(${longErrors.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 0 B\\)`));
+		assert.doesNotMatch(compacted.content, /…/);
 	});
 
 	it("does not recompact already compacted handler receipts", () => {
