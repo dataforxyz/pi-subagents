@@ -929,7 +929,7 @@ Fields:
 - `mode`: default `always`; use `fork-only` to inject only for forked runs, or `off` to disable the bridge.
 - `instructionFile`: optional Markdown template replacing the default bridge instructions. `{orchestratorTarget}` is interpolated. Relative paths resolve from `~/.pi/agent/extensions/subagent/`.
 
-Bridge activation also requires `pi-intercom` to be installed and enabled through `pi install npm:pi-intercom` or a legacy local extension checkout, a targetable current session name or fallback alias, and `pi-intercom` in any explicit agent `extensions` allowlist.
+Bridge activation also requires `pi-intercom` to be installed and enabled through Pi settings (including local/path package entries), `pi install npm:pi-intercom`, or a legacy local extension checkout, a targetable current session name or fallback alias, and `pi-intercom` in any explicit agent `extensions` allowlist.
 
 The default injected guidance tells children to use `contact_supervisor` with `reason: "need_decision"` when blocked or needing a decision, `reason: "progress_update"` only for meaningful blocked/progress updates, generic `intercom` as fallback plumbing, and avoid routine completion handoffs.
 
@@ -940,12 +940,12 @@ The default injected guidance tells children to use `contact_supervisor` with `r
   "backgroundForkHandlers": {
     "enabled": true,
     "notify": "summary",
-    "triggerParentOnSummary": false
+    "triggerParentOnSummary": true
   }
 }
 ```
 
-Async subagent completions and async control notices default to a sibling Pi handler instead of triggering the active parent feed. Successful and failed per-step completion records are coalesced into the aggregate async completion handler to avoid duplicate step + final summaries; actionable in-progress problems should use control notices. The parent receives passive handler summaries only by default; set `notify: "ack-and-summary"` if launch acknowledgements are also needed, and set `triggerParentOnSummary: true` only when summaries should start a parent turn. Set `enabled: false` to opt out of sibling handling; fallback delivery is still display-only and does not trigger a parent turn.
+Async subagent completions and async control notices default to a sibling Pi handler, and the final handler summary wakes the parent so the creator knows the run finished or needs attention. Successful and failed per-step completion records are coalesced into the aggregate async completion handler to avoid duplicate step + final summaries; actionable in-progress problems should use control notices. The parent receives final summaries by default; set `notify: "ack-and-summary"` if launch acknowledgements are also needed, set `triggerParentOnSummary: false` only when summaries should remain display-only, or set `notify: "none"` to keep handler summaries in logs only. Set `enabled: false` to opt out of sibling handling; fallback completion/control delivery still wakes the parent.
 
 Routine-success handler receipts are compacted before model context is built so repeated background summaries do not bloat later turns. Compaction is conservative: the receipt must show success/exit 0, a usable `Output:` log path with byte size, an absent or empty `Errors:` line, and no inline blocker/action-required markers. Handler id, exit, Output/Errors pointers, byte sizes, and a few summary lines stay inline. Failed receipts, blocker/action-required receipts, non-empty stderr, missing/unavailable output logs, and already-compacted receipts are left unchanged.
 
@@ -953,7 +953,7 @@ Fields:
 
 - `enabled`: default `true`; route interrupting background notifications through a sibling handler.
 - `notify`: default `summary`; accepts `ack-and-summary`, `summary`, or `none`.
-- `triggerParentOnSummary`: default `false`; keep summaries display-only unless explicitly enabled.
+- `triggerParentOnSummary`: default `true`; final summaries start a parent turn so the creator is notified when async work finishes.
 - `piCommand`: optional Pi executable override for tests or custom installs.
 
 ### `worktreeSetupHook`

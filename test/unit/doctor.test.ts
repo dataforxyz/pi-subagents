@@ -172,7 +172,7 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /- package git: failed — Error: git exploded/);
 			assert.match(report, /- asyncByDefault: false/);
 			assert.match(report, /- forceTopLevelAsync: false/);
-			assert.match(report, /- background fork handlers: enabled; notify=summary; triggerParentOnSummary=false/);
+			assert.match(report, /- background fork handlers: enabled; notify=summary; triggerParentOnSummary=true/);
 			assert.match(report, /- async runs: failed .*Error: not a directory:/);
 			assert.match(report, /- results: missing /);
 			assert.match(report, /- agents\/chains: failed — Error: discovery exploded/);
