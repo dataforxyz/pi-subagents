@@ -126,7 +126,7 @@ export function resolveBackgroundForkHandlersConfig(config?: BackgroundForkHandl
 	return {
 		enabled: config?.enabled ?? true,
 		notify: config?.notify ?? "summary",
-		triggerParentOnSummary: config?.triggerParentOnSummary ?? false,
+		triggerParentOnSummary: config?.triggerParentOnSummary ?? true,
 		...(config?.piCommand ? { piCommand: config.piCommand } : {}),
 	};
 }
@@ -220,6 +220,10 @@ function formatSummary(run: BackgroundForkRun, status: "complete" | "failed", co
 	].join("\n");
 }
 
+function shouldWakeParentForFallback(event: SubagentBackgroundForkEvent): boolean {
+	return event.type === "async-complete" || event.type === "control-notice";
+}
+
 function sendFallback(pi: Pick<ExtensionAPI, "sendMessage">, event: SubagentBackgroundForkEvent): void {
 	pi.sendMessage(
 		{
@@ -228,7 +232,7 @@ function sendFallback(pi: Pick<ExtensionAPI, "sendMessage">, event: SubagentBack
 			display: true,
 			details: event.details,
 		},
-		{ triggerTurn: false },
+		{ triggerTurn: shouldWakeParentForFallback(event) },
 	);
 }
 
