@@ -56,7 +56,7 @@ function wait(ms: number): Promise<void> {
 }
 
 describe("subagent control notice delivery", () => {
-	it("forks async needs-attention notices without triggering the main feed", async () => {
+	it("forks async needs-attention notices and wakes the main feed", async () => {
 		const mockPi = createMockPi();
 		mockPi.install();
 		mockPi.onCall({ output: "control handled in fork" });
@@ -77,7 +77,7 @@ describe("subagent control notice delivery", () => {
 				await wait(20);
 			}
 			assert.equal(recorder.sent.length, 1);
-			assert.equal(recorder.sent.some((entry) => (entry as any).options?.triggerTurn === true), false);
+			assert.equal(recorder.sent.some((entry) => (entry as any).options?.triggerTurn === true), true);
 			assert.equal((recorder.sent[0] as any).message.customType, "subagent-fork-handler");
 			assert.equal((recorder.sent[0] as any).message.details.status, "complete");
 			assert.match(String((recorder.sent[0] as any).message.content), /control handled in fork/);

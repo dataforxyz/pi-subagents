@@ -49,7 +49,7 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 1);
 		assert.equal((sent[0] as any).message.customType, "subagent-notify");
 		assert.equal((sent[0] as any).message.content, "Background task completed: **worker**\n\n(no output)");
-		assert.deepEqual((sent[0] as any).options, { triggerTurn: false });
+		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
 	});
 
 	it("preserves non-empty completion summaries", () => {
@@ -70,7 +70,7 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 1);
 		assert.equal((sent[0] as any).message.customType, "subagent-notify");
 		assert.equal((sent[0] as any).message.content, `Background task completed: **worker** (2/3)\n\n${summary}`);
-		assert.deepEqual((sent[0] as any).options, { triggerTurn: false });
+		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
 	});
 
 	it("preserves session paths in notification content", () => {
@@ -89,7 +89,7 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 1);
 		assert.equal((sent[0] as any).message.customType, "subagent-notify");
 		assert.equal((sent[0] as any).message.content, "Background task completed: **worker**\n\nDone\n\nSession file: /tmp/session.jsonl");
-		assert.deepEqual((sent[0] as any).options, { triggerTurn: false });
+		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
 	});
 
 	it("labels paused completions as paused even without an exit code", () => {
@@ -107,7 +107,7 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 1);
 		assert.equal((sent[0] as any).message.customType, "subagent-notify");
 		assert.equal((sent[0] as any).message.content, "Background task paused: **worker**\n\nPaused after interrupt. Waiting for explicit next action.");
-		assert.deepEqual((sent[0] as any).options, { triggerTurn: false });
+		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
 	});
 
 	it("suppresses failed per-step notifications because final completion covers them", () => {
@@ -146,7 +146,7 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 0);
 	});
 
-	it("uses non-triggering fallback when a fork handler launch fails", async () => {
+	it("uses a triggering fallback when a fork handler launch fails", async () => {
 		const { events, sent } = createPi({ enabled: true, piCommand: "/definitely/missing/pi-subagents-handler" });
 
 		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
@@ -161,10 +161,10 @@ describe("registerSubagentNotify", () => {
 		await waitForSent(sent, 1);
 		assert.equal((sent[0] as any).message.customType, "subagent-notify");
 		assert.equal((sent[0] as any).message.content, "Background task completed: **worker**\n\nDone after failed fork");
-		assert.deepEqual((sent[0] as any).options, { triggerTurn: false });
+		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
 	});
 
-	it("forks background completions by default without triggering the main feed", async () => {
+	it("forks background completions by default and wakes the main feed", async () => {
 		const mockPi = createMockPi();
 		mockPi.install();
 		mockPi.onCall({ echoEnv: [SUBAGENT_CHILD_ENV, "PI_SUBAGENT_BACKGROUND_HANDLER"] });
@@ -181,7 +181,7 @@ describe("registerSubagentNotify", () => {
 			});
 
 			await waitForSent(sent, 1);
-			assert.equal(sent.some((entry) => (entry as any).options?.triggerTurn === true), false);
+			assert.equal(sent.some((entry) => (entry as any).options?.triggerTurn === true), true);
 			assert.equal((sent[0] as any).message.customType, "subagent-fork-handler");
 			assert.equal((sent[0] as any).message.details.status, "complete");
 			assert.match((sent[0] as any).message.content, /"PI_SUBAGENT_CHILD":"1"/);
@@ -250,6 +250,6 @@ describe("registerSubagentNotify", () => {
 
 		assert.equal(sent.length, 1);
 		assert.equal((sent[0] as any).message.customType, "subagent-notify");
-		assert.deepEqual((sent[0] as any).options, { triggerTurn: false });
+		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
 	});
 });
