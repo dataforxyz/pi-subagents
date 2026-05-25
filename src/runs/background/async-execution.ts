@@ -31,6 +31,7 @@ import {
 	type MaxOutputConfig,
 	type NestedRouteInfo,
 	type ResolvedControlConfig,
+	type SubagentNotifyConfig,
 	type SubagentRunMode,
 	ASYNC_DIR,
 	RESULTS_DIR,
@@ -121,6 +122,7 @@ interface AsyncChainParams {
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	nestedRoute?: NestedRouteInfo;
 	acceptance?: AcceptanceInput;
+	notify?: SubagentNotifyConfig;
 }
 
 interface AsyncSingleParams {
@@ -590,6 +592,7 @@ export function executeAsyncChain(
 			cwd: runnerCwd,
 			asyncDir,
 			nestedRoute,
+			notify: params.notify,
 		});
 	}
 

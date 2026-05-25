@@ -218,6 +218,10 @@ const ChainItem = Type.Object({
 	],
 });
 
+const NotifyOverrides = Type.Object({
+	lowWatermark: Type.Optional(Type.Integer({ minimum: 1, description: "For async parallel/chain runs, notify the parent when active running steps drop below this count." })),
+});
+
 const ControlOverrides = Type.Object({
 	enabled: Type.Optional(Type.Boolean({ description: "Enable/disable subagent control attention tracking for this run" })),
 	needsAttentionAfterMs: Type.Optional(Type.Integer({ minimum: 1, description: "No-observed-activity window before a run needs attention" })),
@@ -293,6 +297,7 @@ export const SubagentParams = Type.Object({
 	// Clarification TUI
 	clarify: Type.Optional(Type.Boolean({ description: "Show TUI to preview/edit before execution. Explicit clarify: true keeps the run foreground for the clarify UI; omitted clarify can still run in the background when async: true is set." })),
 	control: Type.Optional(ControlOverrides),
+	notify: Type.Optional(NotifyOverrides),
 	// Solo agent overrides
 	output: Type.Optional(Type.Unsafe({
 		anyOf: [

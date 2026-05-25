@@ -41,6 +41,8 @@ import { formatDuration, shortenPath } from "../shared/formatters.ts";
 import { loadConfig } from "./config.ts";
 import {
 	type Details,
+	type ExtensionConfig,
+	type SubagentLowWatermarkEvent,
 	type SubagentState,
 	ASYNC_DIR,
 	DEFAULT_ARTIFACT_CONFIG,
@@ -49,6 +51,7 @@ import {
 	SUBAGENT_ASYNC_COMPLETE_EVENT,
 	SUBAGENT_ASYNC_STARTED_EVENT,
 	SUBAGENT_CONTROL_EVENT,
+	SUBAGENT_LOW_WATERMARK_EVENT,
 	WIDGET_KEY,
 } from "../shared/types.ts";
 import {
@@ -403,6 +406,7 @@ EXECUTION (use exactly ONE mode):
 • SINGLE: { agent, task? } - one task; omit task for self-contained agents
 • CHAIN: { chain: [{agent:"agent-a"}, {parallel:[{agent:"agent-b",count:3}]}] } - sequential pipeline with optional parallel fan-out
 • PARALLEL: { tasks: [{agent,task,count?,output?,reads?,progress?}, ...], concurrency?: number, worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
+• Optional notify: { lowWatermark: 3 } - for async parallel/chain runs, wake the parent when active running steps drop below N
 • Optional context: { context: "fresh" | "fork" } (default: if any requested agent has defaultContext: "fork", the whole invocation uses fork; otherwise "fresh"; inspect agent defaults via { action: "list" })
 • Optional parent routing for fork handlers: { parent: "auto" | "main" | "current" }. auto keeps sync results with the current fork but adopts async fork-launched runs into the inherited main dialog when available.
 
@@ -432,7 +436,7 @@ DIAGNOSTICS:
 			"Sync (default) blocks the calling agent until the subagent finishes. Prefer async: true (or PARALLEL with multiple long tasks) so the turn can end and the parent is woken via intercom on completion.",
 			"Use sync only when the parent must consume the subagent's output before its next tool call (e.g., chain composition, immediate code-review verdict). Anything that takes longer than a couple of minutes should be async.",
 			"For waiting on external state (file appears, process exits, port opens, url ready, log line matches), use return_on rather than spinning a subagent.",
-			"After async dispatch, do not poll subagent({action:'status'}) in a loop. Either wait for the intercom completion message or register a return_on watcher on the run's result file.",
+			"After async dispatch, do not poll subagent({action:'status'}) in a loop. Either wait for the intercom completion message, use notify.lowWatermark for pool-refill prompts, or register a return_on watcher on the run's result file.",
 		],
 		parameters: SubagentParams,
 
@@ -515,10 +519,24 @@ DIAGNOSTICS:
 			getParentIntercomTarget,
 		});
 	};
+	const lowWatermarkHandler = (payload: unknown) => {
+		const details = payload as SubagentLowWatermarkEvent;
+		const content = details.message || `Subagent pool low-watermark reached for run ${details.runId}.`;
+		pi.sendMessage(
+			{
+				customType: "subagent-low-watermark",
+				content,
+				display: true,
+				details,
+			},
+			{ triggerTurn: true },
+		);
+	};
 	const eventUnsubscribes = [
 		pi.events.on(SUBAGENT_ASYNC_STARTED_EVENT, handleStarted),
 		pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete),
 		pi.events.on(SUBAGENT_CONTROL_EVENT, controlEventHandler),
+		pi.events.on(SUBAGENT_LOW_WATERMARK_EVENT, lowWatermarkHandler),
 	];
 	globalStore[eventUnsubscribeStoreKey] = eventUnsubscribes;
 

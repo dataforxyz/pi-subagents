@@ -5,6 +5,7 @@ import { renderWidget, widgetRenderKey } from "../../tui/render.ts";
 import { formatControlNoticeMessage } from "../shared/subagent-control.ts";
 import {
 	type AsyncJobState,
+	type AsyncJobStep,
 	type AsyncStartedEvent,
 	type ControlEvent,
 	type SubagentState,
@@ -13,6 +14,7 @@ import {
 	SUBAGENT_ASYNC_STEP_COMPLETE_EVENT,
 	SUBAGENT_CONTROL_EVENT,
 	SUBAGENT_CONTROL_INTERCOM_EVENT,
+	SUBAGENT_LOW_WATERMARK_EVENT,
 } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
@@ -25,6 +27,35 @@ interface AsyncJobTrackerOptions {
 	resultsDir?: string;
 	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 	now?: () => number;
+}
+
+function stepStatusCounts(steps: AsyncJobStep[]): { active: number; completed: number; failed: number; paused: number; pending: number } {
+	return {
+		active: steps.filter((step) => step.status === "running").length,
+		completed: steps.filter((step) => step.status === "complete" || step.status === "completed").length,
+		failed: steps.filter((step) => step.status === "failed").length,
+		paused: steps.filter((step) => step.status === "paused").length,
+		pending: steps.filter((step) => step.status === "pending").length,
+	};
+}
+
+function formatLowWatermarkMessage(input: {
+	runId: string;
+	active: number;
+	lowWatermark: number;
+	total: number;
+	completed: number;
+	failed: number;
+	paused: number;
+	pending: number;
+}): string {
+	const extras = [
+		`${input.completed}/${input.total} complete`,
+		input.failed ? `${input.failed} failed` : undefined,
+		input.paused ? `${input.paused} paused` : undefined,
+		input.pending ? `${input.pending} pending` : undefined,
+	].filter((part): part is string => Boolean(part));
+	return `Subagent pool low-watermark: ${input.active} active running step${input.active === 1 ? "" : "s"} below threshold ${input.lowWatermark} for run ${input.runId} (${extras.join(", ")}). Consider launching more independent subagents if useful.`;
 }
 
 export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: SubagentState, asyncDirRoot: string, options: AsyncJobTrackerOptions = {}): {
@@ -56,6 +87,31 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			}
 		}, completionRetentionMs);
 		state.cleanupTimers.set(asyncId, timer);
+	};
+	const maybeEmitLowWatermark = (job: AsyncJobState) => {
+		if (!job.lowWatermark || job.lowWatermark < 1 || job.status !== "running" || !job.steps?.length) return;
+		if (!job.activeParallelGroup && job.mode !== "parallel") return;
+		const counts = stepStatusCounts(job.steps);
+		if (counts.active === 0 && counts.pending === 0) return;
+		if (counts.active >= job.lowWatermark) {
+			job.lowWatermarkArmed = true;
+			return;
+		}
+		if (job.lowWatermarkArmed === false) return;
+		job.lowWatermarkArmed = false;
+		const total = job.steps.length;
+		const message = formatLowWatermarkMessage({ runId: job.asyncId, lowWatermark: job.lowWatermark, total, ...counts });
+		pi.events.emit(SUBAGENT_LOW_WATERMARK_EVENT, {
+			runId: job.asyncId,
+			asyncDir: job.asyncDir,
+			mode: job.mode,
+			lowWatermark: job.lowWatermark,
+			total,
+			...counts,
+			agents: job.steps.filter((step) => step.status === "running").map((step) => step.agent),
+			message,
+			ts: Date.now(),
+		});
 	};
 	const emitNewControlEvents = (job: AsyncJobState) => {
 		const eventsPath = path.join(job.asyncDir, "events.jsonl");
@@ -230,6 +286,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 							job.runningSteps = visibleSteps.filter((step) => step.status === "running").length;
 							job.completedSteps = visibleSteps.filter((step) => step.status === "complete" || step.status === "completed").length;
 							if (status.state === "complete") job.completedSteps = visibleSteps.length;
+							maybeEmitLowWatermark(job);
 						}
 						job.sessionDir = status.sessionDir ?? job.sessionDir;
 						job.outputFile = status.outputFile ?? job.outputFile;
@@ -291,6 +348,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			activeParallelGroup: Boolean(firstGroupCount && firstGroupCount > 0),
 			startedAt: now,
 			updatedAt: now,
+			...(typeof info.notify?.lowWatermark === "number" && Number.isInteger(info.notify.lowWatermark) && info.notify.lowWatermark >= 1
+				? { lowWatermark: info.notify.lowWatermark, lowWatermarkArmed: true }
+				: {}),
 		});
 		ensurePoller();
 		if (state.lastUiContext) {

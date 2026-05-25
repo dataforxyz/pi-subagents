@@ -151,6 +151,19 @@ Background runs keep working after control returns to you. Inspect active runs w
 
 They also show a compact async widget and send completion notifications. Parallel background runs show per-agent progress instead of fake chain steps. Chains with parallel groups keep their grouped shape in progress and results, so failed or paused agents stay visible next to completed ones. When a child is explicitly allowed to fan out with `tools: subagent`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
 
+For long async fanout, opt into a low-watermark wakeup when you want the parent agent to consider refilling the pool before every child finishes:
+
+```ts
+subagent({
+  tasks: [/* initial agents */],
+  concurrency: 6,
+  async: true,
+  notify: { lowWatermark: 3 }
+})
+```
+
+When active running steps drop below `3`, Pi injects a visible parent message and triggers a turn. It does not automatically launch more agents; the parent remains responsible for deciding whether more independent work is safe and useful.
+
 You can also ask naturally:
 
 ```text

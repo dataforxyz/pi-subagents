@@ -98,6 +98,10 @@ export type ActivityState = "active_long_running" | "needs_attention";
 export type ControlEventType = "active_long_running" | "needs_attention";
 export type ControlNotificationChannel = "event" | "async" | "intercom";
 
+export interface SubagentNotifyConfig {
+	lowWatermark?: number;
+}
+
 export interface ControlConfig {
 	enabled?: boolean;
 	needsAttentionAfterMs?: number;
@@ -558,6 +562,23 @@ export interface AsyncStartedEvent {
 	parallelGroups?: AsyncParallelGroupStatus[];
 	workflowGraph?: WorkflowGraphSnapshot;
 	nestedRoute?: NestedRouteInfo;
+	notify?: SubagentNotifyConfig;
+}
+
+export interface SubagentLowWatermarkEvent {
+	runId: string;
+	asyncDir: string;
+	mode?: SubagentRunMode;
+	lowWatermark: number;
+	active: number;
+	total: number;
+	completed: number;
+	failed: number;
+	paused: number;
+	pending: number;
+	agents: string[];
+	message: string;
+	ts: number;
 }
 
 export interface AsyncStatus {
@@ -660,6 +681,8 @@ export interface AsyncJobState {
 	controlEventCursor?: number;
 	nestedRoute?: NestedRouteInfo;
 	nestedChildren?: NestedRunSummary[];
+	lowWatermark?: number;
+	lowWatermarkArmed?: boolean;
 }
 
 export interface ForegroundResumeChild {
@@ -746,6 +769,7 @@ export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
 export const SUBAGENT_ASYNC_STEP_COMPLETE_EVENT = "subagent:async-step-complete";
 export const SUBAGENT_CONTROL_EVENT = "subagent:control-event";
 export const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
+export const SUBAGENT_LOW_WATERMARK_EVENT = "subagent:low-watermark";
 export const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 export const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
 

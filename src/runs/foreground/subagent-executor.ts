@@ -78,6 +78,7 @@ import {
 	type NestedRunSummary,
 	type ResolvedControlConfig,
 	type SingleResult,
+	type SubagentNotifyConfig,
 	type SubagentRunMode,
 	type SubagentState,
 	DEFAULT_ARTIFACT_CONFIG,
@@ -128,6 +129,7 @@ export interface SubagentParamsLike {
 	clarify?: boolean;
 	share?: boolean;
 	control?: ControlConfig;
+	notify?: SubagentNotifyConfig;
 	sessionDir?: string;
 	cwd?: string;
 	maxOutput?: MaxOutputConfig;
@@ -1134,6 +1136,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			controlIntercomTarget,
 			childIntercomTarget,
 			nestedRoute,
+			notify: params.notify,
 		});
 	}
 
@@ -1163,6 +1166,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			controlIntercomTarget,
 			childIntercomTarget,
 			nestedRoute,
+			notify: params.notify,
 		});
 	}
 
@@ -1306,6 +1310,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			controlIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 			childIntercomTarget: data.intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(id, agent, index) : undefined,
 			nestedRoute: data.nestedRoute,
+			notify: params.notify,
 		});
 	}
 
@@ -1735,6 +1740,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				controlConfig,
 				controlIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 				childIntercomTarget: data.intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(id, agent, index) : undefined,
+				notify: params.notify,
 			});
 		}
 	}

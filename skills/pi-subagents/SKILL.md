@@ -318,6 +318,8 @@ subagent({
 
 File-only output mode also works for async single runs, top-level parallel task items, sequential chain steps, and chain parallel task items. In chains, `{previous}` receives the compact saved-file reference when the prior step used file-only mode.
 
+For long async fanout where you may want to refill before the whole batch completes, opt into `notify: { lowWatermark: N }`. When active running steps drop below `N`, Pi injects a parent-visible message and triggers a turn. This is a notification only; the parent decides whether launching more agents is safe.
+
 For review fanout where the parent continues a local audit:
 
 ```typescript

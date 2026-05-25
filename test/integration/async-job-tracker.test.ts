@@ -145,6 +145,127 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 		}
 	});
 
+	it("emits a low-watermark notification once when active parallel steps drop below the threshold", async () => {
+		const asyncRoot = createTempDir("pi-async-job-tracker-");
+		try {
+			const runDir = path.join(asyncRoot, "run-low-watermark");
+			fs.mkdirSync(runDir, { recursive: true });
+			const writeStatus = (steps: Array<{ agent: string; status: string }>, lastUpdate: number) => fs.writeFileSync(path.join(runDir, "status.json"), JSON.stringify({
+				runId: "run-low-watermark",
+				mode: "parallel",
+				state: "running",
+				startedAt: Date.now() - 1000,
+				lastUpdate,
+				currentStep: 0,
+				chainStepCount: 1,
+				parallelGroups: [{ start: 0, count: 4, stepIndex: 0 }],
+				steps,
+			}), "utf-8");
+			writeStatus([
+				{ agent: "scout", status: "running" },
+				{ agent: "reviewer", status: "running" },
+				{ agent: "auditor", status: "running" },
+				{ agent: "validator", status: "running" },
+			], 1000);
+
+			const state = createState();
+			const recorder = createEventRecorder();
+			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
+				pollIntervalMs: 10,
+			});
+			tracker.handleStarted({
+				id: "run-low-watermark",
+				asyncDir: runDir,
+				mode: "parallel",
+				agents: ["scout", "reviewer", "auditor", "validator"],
+				chainStepCount: 1,
+				parallelGroups: [{ start: 0, count: 4, stepIndex: 0 }],
+				notify: { lowWatermark: 3 },
+			});
+
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			assert.equal(recorder.events.some((event) => event.channel === "subagent:low-watermark"), false);
+
+			writeStatus([
+				{ agent: "scout", status: "complete" },
+				{ agent: "reviewer", status: "complete" },
+				{ agent: "auditor", status: "running" },
+				{ agent: "validator", status: "running" },
+			], 2000);
+			await new Promise((resolve) => setTimeout(resolve, 40));
+
+			const events = recorder.events.filter((event) => event.channel === "subagent:low-watermark");
+			assert.equal(events.length, 1);
+			assert.deepEqual(events[0]?.data, {
+				runId: "run-low-watermark",
+				asyncDir: runDir,
+				mode: "parallel",
+				lowWatermark: 3,
+				total: 4,
+				active: 2,
+				completed: 2,
+				failed: 0,
+				paused: 0,
+				pending: 0,
+				agents: ["auditor", "validator"],
+				message: "Subagent pool low-watermark: 2 active running steps below threshold 3 for run run-low-watermark (2/4 complete). Consider launching more independent subagents if useful.",
+				ts: (events[0]?.data as { ts?: number }).ts,
+			});
+
+			writeStatus([
+				{ agent: "scout", status: "complete" },
+				{ agent: "reviewer", status: "complete" },
+				{ agent: "auditor", status: "running" },
+				{ agent: "validator", status: "running" },
+			], 3000);
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			assert.equal(recorder.events.filter((event) => event.channel === "subagent:low-watermark").length, 1);
+		} finally {
+			removeTempDir(asyncRoot);
+		}
+	});
+
+	it("does not emit low-watermark notifications for sequential chain steps", async () => {
+		const asyncRoot = createTempDir("pi-async-job-tracker-");
+		try {
+			const runDir = path.join(asyncRoot, "run-low-watermark-sequential");
+			fs.mkdirSync(runDir, { recursive: true });
+			fs.writeFileSync(path.join(runDir, "status.json"), JSON.stringify({
+				runId: "run-low-watermark-sequential",
+				mode: "chain",
+				state: "running",
+				startedAt: Date.now() - 1000,
+				lastUpdate: Date.now(),
+				currentStep: 0,
+				chainStepCount: 3,
+				steps: [
+					{ agent: "scout", status: "running" },
+					{ agent: "planner", status: "pending" },
+					{ agent: "worker", status: "pending" },
+				],
+			}), "utf-8");
+
+			const state = createState();
+			const recorder = createEventRecorder();
+			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
+				pollIntervalMs: 10,
+			});
+			tracker.handleStarted({
+				id: "run-low-watermark-sequential",
+				asyncDir: runDir,
+				mode: "chain",
+				agents: ["scout", "planner", "worker"],
+				chainStepCount: 3,
+				notify: { lowWatermark: 3 },
+			});
+
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			assert.equal(recorder.events.some((event) => event.channel === "subagent:low-watermark"), false);
+		} finally {
+			removeTempDir(asyncRoot);
+		}
+	});
+
 	it("adds flat step indexes to polled active parallel group steps", async () => {
 		const asyncRoot = createTempDir("pi-async-job-tracker-");
 		try {
