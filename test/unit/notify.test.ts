@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
@@ -164,21 +165,30 @@ describe("registerSubagentNotify", () => {
 	});
 
 	it("uses a triggering fallback when a fork handler launch fails", async () => {
-		const { events, sent } = createPi({ enabled: true, piCommand: "/definitely/missing/pi-subagents-handler" });
+		const originalHome = process.env.HOME;
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-notify-home-"));
+		process.env.HOME = home;
+		try {
+			const { events, sent } = createPi({ enabled: true, piCommand: "/definitely/missing/pi-subagents-handler" });
 
-		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
-			id: "notify-fork-fail-1",
-			agent: "worker",
-			success: true,
-			summary: "Done after failed fork",
-			exitCode: 0,
-			timestamp: 456,
-		});
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: "notify-fork-fail-1",
+				agent: "worker",
+				success: true,
+				summary: "Done after failed fork",
+				exitCode: 0,
+				timestamp: 456,
+			});
 
-		await waitForSent(sent, 1);
-		assert.equal((sent[0] as any).message.customType, "subagent-notify");
-		assert.equal((sent[0] as any).message.content, "Background task completed: **worker**\n\nDone after failed fork");
-		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
+			await waitForSent(sent, 1);
+			assert.equal((sent[0] as any).message.customType, "subagent-notify");
+			assert.equal((sent[0] as any).message.content, "Background task completed: **worker**\n\nDone after failed fork");
+			assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
+		} finally {
+			if (originalHome === undefined) delete process.env.HOME;
+			else process.env.HOME = originalHome;
+			fs.rmSync(home, { recursive: true, force: true });
+		}
 	});
 
 	it("forks background completions by default and wakes the main feed", async () => {

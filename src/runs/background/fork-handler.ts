@@ -54,8 +54,14 @@ interface BackgroundForkRunsState {
 	handlers: BackgroundForkRun[];
 }
 
-const STATE_DIR = getForkStateDir("subagents");
-const HANDLERS_FILE = getForkHandlersFile("subagents");
+function stateDir(): string {
+	return getForkStateDir("subagents");
+}
+
+function handlersFile(): string {
+	return getForkHandlersFile("subagents");
+}
+
 const SUMMARY_LIMIT_BYTES = 16 * 1024;
 const MAX_PERSISTED_HANDLERS = 200;
 
@@ -92,7 +98,7 @@ function makeRunId(event: SubagentBackgroundForkEvent): string {
 
 async function readPersistedRuns(): Promise<BackgroundForkRun[]> {
 	try {
-		const raw = await fs.promises.readFile(HANDLERS_FILE, "utf8");
+		const raw = await fs.promises.readFile(handlersFile(), "utf8");
 		const parsed = JSON.parse(raw) as Partial<BackgroundForkRunsState>;
 		return Array.isArray(parsed.handlers) ? parsed.handlers : [];
 	} catch (error) {
@@ -102,11 +108,12 @@ async function readPersistedRuns(): Promise<BackgroundForkRun[]> {
 }
 
 async function writePersistedRuns(runs: BackgroundForkRun[]): Promise<void> {
-	await fs.promises.mkdir(STATE_DIR, { recursive: true });
-	const tmp = `${HANDLERS_FILE}.${process.pid}.${Date.now()}.tmp`;
+	const filePath = handlersFile();
+	await fs.promises.mkdir(stateDir(), { recursive: true });
+	const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
 	const state: BackgroundForkRunsState = { version: 1, handlers: runs.slice(-MAX_PERSISTED_HANDLERS) };
 	await fs.promises.writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-	await fs.promises.rename(tmp, HANDLERS_FILE);
+	await fs.promises.rename(tmp, filePath);
 }
 
 async function persistRun(run: BackgroundForkRun): Promise<void> {
