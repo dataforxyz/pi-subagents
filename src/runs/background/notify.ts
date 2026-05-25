@@ -4,7 +4,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildCompletionKey, getGlobalSeenMap, markSeenWithTtl } from "./completion-dedupe.ts";
-import { deliverBackgroundForkEvent } from "./fork-handler.ts";
+import { deliverBackgroundForkEvent, reconcileBackgroundForkRuns } from "./fork-handler.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, type BackgroundForkHandlersConfig } from "../../shared/types.ts";
 
 interface ChainStepResult {
@@ -57,6 +57,10 @@ export default function registerSubagentNotify(
 			// Best effort cleanup for stale handlers from an older reload.
 		}
 	}
+
+	void reconcileBackgroundForkRuns().catch((error) => {
+		console.error("[pi-subagents] Failed to reconcile background fork handlers:", error);
+	});
 
 	const seen = getGlobalSeenMap("__pi_subagents_notify_seen__");
 	const ttlMs = 10 * 60 * 1000;
