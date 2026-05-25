@@ -43,6 +43,7 @@ interface BackgroundForkRun {
 	exitCode?: number | null;
 	signal?: NodeJS.Signals | null;
 	error?: string;
+	finishSource?: "close" | "reconciled";
 	notify: BackgroundForkHandlerNotify;
 	triggerParentOnSummary: boolean;
 	pid?: number;
@@ -120,6 +121,40 @@ async function patchPersistedRun(id: string, patch: Partial<BackgroundForkRun>):
 	if (index === -1) return;
 	runs[index] = { ...runs[index]!, ...patch };
 	await writePersistedRuns(runs);
+}
+
+function isProcessAlive(pid: number | undefined): boolean {
+	if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+export async function reconcileBackgroundForkRuns(): Promise<number> {
+	const runs = await readPersistedRuns();
+	let changed = 0;
+	const now = Date.now();
+	const next = runs.map((run) => {
+		if (run.status !== "starting" && run.status !== "running") return run;
+		if (run.status === "running" && isProcessAlive(run.pid)) return run;
+		const stderr = fs.existsSync(run.stderrPath) ? fs.readFileSync(run.stderrPath, "utf8") : "";
+		const status = run.status === "starting" || stderr.trim() ? "failed" : "complete";
+		changed += 1;
+		return {
+			...run,
+			status,
+			endedAt: run.endedAt ?? now,
+			exitCode: run.exitCode ?? null,
+			signal: run.signal ?? null,
+			finishSource: "reconciled" as const,
+			...(status === "failed" ? { error: run.error || stderr.trim() || "handler was still starting when reconciliation found no live pid" } : {}),
+		};
+	});
+	if (changed > 0) await writePersistedRuns(next);
+	return changed;
 }
 
 export function resolveBackgroundForkHandlersConfig(config?: BackgroundForkHandlersConfig): ResolvedBackgroundForkHandlersConfig {
@@ -242,6 +277,9 @@ export async function deliverBackgroundForkEvent(
 	event: SubagentBackgroundForkEvent,
 ): Promise<void> {
 	const resolved = resolveBackgroundForkHandlersConfig(config);
+	void reconcileBackgroundForkRuns().catch((error) => {
+		console.error("[pi-subagents] Failed to reconcile background fork handlers:", error);
+	});
 	if (!resolved.enabled) {
 		sendFallback(pi, event);
 		return;
@@ -289,7 +327,7 @@ export async function deliverBackgroundForkEvent(
 			env: buildForkHandlerEnv("subagents", run.id, { ...process.env, [SUBAGENT_CHILD_ENV]: "1" }),
 			onClose: (code, signal) => {
 				const status = code === 0 ? "complete" : "failed";
-				void patchPersistedRun(run!.id, { status, endedAt: Date.now(), exitCode: code, signal }).catch((error) => {
+				void patchPersistedRun(run!.id, { status, endedAt: Date.now(), exitCode: code, signal, finishSource: "close" }).catch((error) => {
 					console.error("[pi-subagents] Failed to persist background fork handler completion:", error);
 				});
 				if (resolved.notify !== "summary" && resolved.notify !== "ack-and-summary") return;
