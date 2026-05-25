@@ -39,6 +39,8 @@ interface SubagentResult {
 	results?: ChainStepResult[];
 	taskIndex?: number;
 	totalTasks?: number;
+	resultIntercomTarget?: string;
+	resultIntercomDelivered?: boolean;
 }
 
 export default function registerSubagentNotify(
@@ -70,6 +72,8 @@ export default function registerSubagentNotify(
 		const now = Date.now();
 		const key = buildCompletionKey(result, "notify");
 		if (markSeenWithTtl(seen, key, now, ttlMs)) return;
+
+		if (result.resultIntercomDelivered) return;
 
 		const agent = result.agent ?? "unknown";
 		const summary = typeof result.summary === "string" ? result.summary : "";

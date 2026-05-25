@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { createResultWatcher } from "../../src/runs/background/result-watcher.ts";
 import { createNestedRoute, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
-import type { SubagentState } from "../../src/shared/types.ts";
+import { SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT, SUBAGENT_RESULT_INTERCOM_EVENT, type SubagentState } from "../../src/shared/types.ts";
 
 function createState(): SubagentState {
 	return {
@@ -28,6 +28,54 @@ function createState(): SubagentState {
 }
 
 describe("result watcher", () => {
+	it("marks async completion when grouped intercom delivery succeeds", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-intercom-"));
+		try {
+			const emitted: Array<{ event: string; data: any }> = [];
+			const listeners = new Map<string, Array<(data: unknown) => void>>();
+			const pi = {
+				events: {
+					on(event: string, cb: (data: unknown) => void) {
+						listeners.set(event, [...(listeners.get(event) ?? []), cb]);
+						return () => listeners.set(event, (listeners.get(event) ?? []).filter((item) => item !== cb));
+					},
+					emit(event: string, data: any) {
+						emitted.push({ event, data });
+						if (event === SUBAGENT_RESULT_INTERCOM_EVENT) {
+							for (const cb of listeners.get(SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT) ?? []) cb({ requestId: data.requestId, delivered: true });
+						}
+						for (const cb of listeners.get(event) ?? []) cb(data);
+					},
+				},
+			};
+			const state = createState();
+			fs.writeFileSync(path.join(resultsDir, "run-delivered.json"), JSON.stringify({
+				id: "run-delivered",
+				cwd: "/repo",
+				mode: "single",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				intercomTarget: "parent-session",
+			}), "utf-8");
+
+			const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+			try {
+				watcher.primeExistingResults();
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			} finally {
+				watcher.stopResultWatcher();
+			}
+
+			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data;
+			assert.equal(completion?.resultIntercomTarget, "parent-session");
+			assert.equal(completion?.resultIntercomDelivered, true);
+			assert.equal(emitted.some((entry) => entry.event === SUBAGENT_RESULT_INTERCOM_EVENT), true);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("processes deferred session-scoped results after session identity is restored", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-session-"));
 		try {

@@ -110,6 +110,23 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
 	});
 
+	it("suppresses async completion notification when intercom result delivery already succeeded", () => {
+		const { events, sent } = createPi({ enabled: false });
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-intercom-delivered",
+			agent: "worker",
+			success: true,
+			summary: "Done",
+			exitCode: 0,
+			timestamp: 123,
+			resultIntercomTarget: "parent-session",
+			resultIntercomDelivered: true,
+		});
+
+		assert.equal(sent.length, 0);
+	});
+
 	it("suppresses failed per-step notifications because final completion covers them", () => {
 		const { events, sent } = createPi({ enabled: false });
 
