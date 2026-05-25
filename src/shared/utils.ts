@@ -26,9 +26,16 @@ function getErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function expandTildePath(input: string): string {
+	if (input === "~") return os.homedir();
+	if (input.startsWith("~/") || input.startsWith("~\\")) return path.join(os.homedir(), input.slice(2));
+	return input;
+}
+
 export function resolveChildCwd(baseCwd: string, childCwd: string | undefined): string {
 	if (!childCwd) return baseCwd;
-	return path.isAbsolute(childCwd) ? childCwd : path.resolve(baseCwd, childCwd);
+	const expandedCwd = expandTildePath(childCwd);
+	return path.isAbsolute(expandedCwd) ? expandedCwd : path.resolve(baseCwd, expandedCwd);
 }
 
 function isNotFoundError(error: unknown): boolean {

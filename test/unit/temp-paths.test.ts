@@ -8,6 +8,7 @@ import {
 	TEMP_ARTIFACTS_DIR,
 	TEMP_ROOT_DIR,
 	getAsyncConfigPath,
+	resolveTempRootBase,
 	resolveTempScopeId,
 } from "../../src/shared/types.ts";
 
@@ -49,6 +50,47 @@ describe("resolveTempScopeId", () => {
 			homedir: () => "/home/12345/app user",
 		});
 		assert.equal(scope, "home-home-12345-app-user");
+	});
+});
+
+describe("resolveTempRootBase", () => {
+	it("prefers explicit PI_SUBAGENTS_TMPDIR over TMPDIR", () => {
+		assert.equal(
+			resolveTempRootBase({ env: { PI_SUBAGENTS_TMPDIR: "./subagents-tmp", TMPDIR: "/tmp/ignored" } }),
+			path.resolve("./subagents-tmp"),
+		);
+	});
+
+	it("uses TMPDIR when no subagents-specific temp root is configured", () => {
+		assert.equal(
+			resolveTempRootBase({ env: { TMPDIR: "/var/tmp/custom" } }),
+			path.resolve("/var/tmp/custom"),
+		);
+	});
+
+	it("falls back to the home tmp directory before os tmp", () => {
+		assert.equal(
+			resolveTempRootBase({ env: { HOME: "/home/alice" }, homedir: () => "/home/ignored", tmpdir: () => "/tmp" }),
+			path.join("/home/alice", "tmp"),
+		);
+		assert.equal(
+			resolveTempRootBase({ env: {}, homedir: () => "/Users/bob", tmpdir: () => "/tmp" }),
+			path.join("/Users/bob", "tmp"),
+		);
+	});
+
+	it("uses os tmp only when no home directory can be resolved", () => {
+		assert.equal(
+			resolveTempRootBase({ env: {}, homedir: () => "", tmpdir: () => "/tmp" }),
+			"/tmp",
+		);
+	});
+
+	it("uses os tmp when home lookup throws", () => {
+		assert.equal(
+			resolveTempRootBase({ env: {}, homedir: () => { throw new Error("no home"); }, tmpdir: () => "/tmp" }),
+			"/tmp",
+		);
 	});
 });
 

@@ -910,9 +910,29 @@ export function resolveTempScopeId(options?: {
 	return "shared";
 }
 
+export function resolveTempRootBase(options?: {
+	env?: Record<string, string | undefined>;
+	homedir?: () => string;
+	tmpdir?: () => string;
+}): string {
+	const env = options?.env ?? process.env;
+	const explicit = env.PI_SUBAGENTS_TMPDIR || env.TMPDIR;
+	if (explicit) return path.resolve(explicit);
+	let home = env.HOME;
+	if (!home) {
+		try {
+			home = (options?.homedir ?? os.homedir)();
+		} catch {
+			// Fall through to the OS temp directory.
+		}
+	}
+	if (home) return path.join(home, "tmp");
+	return (options?.tmpdir ?? os.tmpdir)();
+}
+
 const MAX_PARALLEL = 8;
 export const MAX_CONCURRENCY = 4;
-export const TEMP_ROOT_DIR = path.join(os.tmpdir(), `pi-subagents-${resolveTempScopeId()}`);
+export const TEMP_ROOT_DIR = path.join(resolveTempRootBase(), `pi-subagents-${resolveTempScopeId()}`);
 export const RESULTS_DIR = path.join(TEMP_ROOT_DIR, "async-subagent-results");
 export const ASYNC_DIR = path.join(TEMP_ROOT_DIR, "async-subagent-runs");
 export const CHAIN_RUNS_DIR = path.join(TEMP_ROOT_DIR, "chain-runs");

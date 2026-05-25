@@ -985,7 +985,13 @@ Each chain run creates a user-scoped temp directory like:
 
 It may contain files such as `context.md`, `plan.md`, `progress.md`, and `parallel-{stepIndex}/.../output.md`. Directories older than 24 hours are cleaned up on extension startup.
 
-Debug artifacts live under `{sessionDir}/subagent-artifacts/` or a user-scoped temp artifact directory. Per task you may see:
+By default `<tmpdir>` resolves to `PI_SUBAGENTS_TMPDIR`, then `TMPDIR`, then
+`$HOME/tmp` or the platform home directory's `tmp` subdirectory when a home
+directory can be resolved, and otherwise falls back to the OS temp directory.
+The runtime creates the chosen temp root as needed. This avoids putting large
+chain artifacts on tmpfs-backed `/tmp` on local workstations.
+
+Debug artifacts live under `{sessionDir}/subagent-artifacts/` or a user-scoped temp artifact directory. For large outputs, prefer an explicit disk-backed `sessionDir` or `PI_SUBAGENTS_TMPDIR=$HOME/tmp`. Per task you may see:
 
 - `{runId}_{agent}_input.md`
 - `{runId}_{agent}_output.md`
@@ -1103,12 +1109,12 @@ Example:
 description: Take a screenshot
 model: claude-sonnet-4-20250514
 subagent: browser-screenshoter
-cwd: /tmp/screenshots
+cwd: ~/tmp/screenshots
 ---
 Use url in the prompt to take screenshot: $@
 ```
 
-Then `/take-screenshot https://example.com` switches to Sonnet, delegates to `browser-screenshoter` with `/tmp/screenshots` as cwd, and restores your model when done. Runtime overrides like `--cwd=<path>` and `--subagent=<name>` work too.
+Then `/take-screenshot https://example.com` switches to Sonnet, delegates to `browser-screenshoter` with `~/tmp/screenshots` as cwd, and restores your model when done. Leading `~` in `cwd` values expands to your home directory; other shell expansions are not performed. Runtime overrides like `--cwd=<path>` and `--subagent=<name>` work too.
 
 For more reusable workflows on top of subagents, including `/chain-prompts` and compare-style prompts such as `/best-of-n`, install `pi-prompt-template-model` separately and copy the examples you want into `~/.pi/agent/prompts/`.
 

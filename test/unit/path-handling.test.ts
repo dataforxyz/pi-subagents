@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
+import { resolveChildCwd } from "../../src/shared/utils.ts";
 
 /**
  * Tests for cross-platform path handling patterns used throughout the codebase.
@@ -52,6 +54,17 @@ describe("path.isAbsolute vs startsWith('/')", () => {
 			assert.equal("C:\\output.md".startsWith("/"), false);
 			assert.equal("C:/output.md".startsWith("/"), false);
 		}
+	});
+});
+
+describe("resolveChildCwd", () => {
+	it("expands leading tilde before resolving child cwd", () => {
+		assert.equal(resolveChildCwd("/repo", "~/tmp/screenshots"), path.join(os.homedir(), "tmp", "screenshots"));
+		assert.equal(resolveChildCwd("/repo", "~"), os.homedir());
+	});
+
+	it("keeps relative child cwd values relative to the base cwd", () => {
+		assert.equal(resolveChildCwd("/repo", "packages/app"), path.resolve("/repo", "packages/app"));
 	});
 });
 

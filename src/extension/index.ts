@@ -20,6 +20,7 @@ import { type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@
 import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { discoverAgents } from "../agents/agents.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "../shared/artifacts.ts";
+import { TEMP_ROOT_DIR } from "../shared/types.ts";
 import { resolveCurrentSessionId } from "../shared/session-identity.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
 import { clearLegacyResultAnimationTimer, renderWidget, renderSubagentResult } from "../tui/render.ts";
@@ -73,7 +74,8 @@ function getSubagentSessionRoot(parentSessionFile: string | null): string {
 		const sessionsDir = path.dirname(parentSessionFile);
 		return path.join(sessionsDir, baseName);
 	}
-	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"));
+	fs.mkdirSync(TEMP_ROOT_DIR, { recursive: true });
+	return fs.mkdtempSync(path.join(TEMP_ROOT_DIR, "pi-subagent-session-"));
 }
 
 function expandTilde(p: string): string {
