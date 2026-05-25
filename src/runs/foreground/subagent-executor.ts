@@ -33,6 +33,7 @@ import {
 import { discoverAvailableSkills, normalizeSkillInput } from "../../agents/skills.ts";
 import { executeAsyncChain, executeAsyncSingle, formatAsyncStartedMessage, isAsyncAvailable } from "../background/async-execution.ts";
 import { createForkContextResolver } from "../../shared/fork-context.ts";
+import { resolveForkParentIntercomTarget, resolveForkParentSessionFile, resolveForkParentSessionId } from "../../shared/fork-parent.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
@@ -2332,11 +2333,12 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 
 		const scope: AgentScope = resolveExecutionAgentScope(effectiveParams.agentScope);
 		const effectiveCwd = effectiveParams.cwd ?? ctx.cwd;
-		const parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
-		deps.state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
+		const parentSessionFile = resolveForkParentSessionFile() ?? ctx.sessionManager.getSessionFile() ?? null;
+		const currentSessionId = resolveForkParentSessionId() ?? resolveCurrentSessionId(ctx.sessionManager);
+		deps.state.currentSessionId = currentSessionId;
 		const discoveredAgents = deps.discoverAgents(effectiveCwd, scope).agents;
 		effectiveParams = applyAgentDefaultContext(effectiveParams, discoveredAgents);
-		const sessionName = resolveIntercomSessionTarget(deps.pi.getSessionName(), ctx.sessionManager.getSessionId());
+		const sessionName = resolveForkParentIntercomTarget() ?? resolveIntercomSessionTarget(deps.pi.getSessionName(), currentSessionId);
 		const intercomBridge = resolveIntercomBridge({
 			config: deps.config.intercomBridge,
 			context: effectiveParams.context,
