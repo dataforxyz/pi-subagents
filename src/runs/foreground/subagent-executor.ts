@@ -33,7 +33,7 @@ import {
 import { discoverAvailableSkills, normalizeSkillInput } from "../../agents/skills.ts";
 import { executeAsyncChain, executeAsyncSingle, formatAsyncStartedMessage, isAsyncAvailable } from "../background/async-execution.ts";
 import { createForkContextResolver } from "../../shared/fork-context.ts";
-import { resolveForkParentIntercomTarget, resolveForkParentSessionFile, resolveForkParentSessionId } from "../../shared/fork-parent.ts";
+import { normalizeForkParentRouting, resolveForkParentIntercomTarget, resolveForkParentSessionFile, resolveForkParentSessionId, shouldUseForkParent } from "../../shared/fork-parent.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
@@ -123,6 +123,7 @@ export interface SubagentParamsLike {
 	concurrency?: number;
 	worktree?: boolean;
 	context?: "fresh" | "fork";
+	parent?: "auto" | "main" | "current";
 	async?: boolean;
 	clarify?: boolean;
 	share?: boolean;
@@ -2333,12 +2334,21 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 
 		const scope: AgentScope = resolveExecutionAgentScope(effectiveParams.agentScope);
 		const effectiveCwd = effectiveParams.cwd ?? ctx.cwd;
-		const parentSessionFile = resolveForkParentSessionFile() ?? ctx.sessionManager.getSessionFile() ?? null;
-		const currentSessionId = resolveForkParentSessionId() ?? resolveCurrentSessionId(ctx.sessionManager);
-		deps.state.currentSessionId = currentSessionId;
 		const discoveredAgents = deps.discoverAgents(effectiveCwd, scope).agents;
 		effectiveParams = applyAgentDefaultContext(effectiveParams, discoveredAgents);
-		const sessionName = resolveForkParentIntercomTarget() ?? resolveIntercomSessionTarget(deps.pi.getSessionName(), currentSessionId);
+		const shareEnabled = effectiveParams.share === true;
+		const hasChain = (effectiveParams.chain?.length ?? 0) > 0;
+		const hasTasks = (effectiveParams.tasks?.length ?? 0) > 0;
+		const hasSingle = !hasChain && !hasTasks && Boolean(effectiveParams.agent);
+		const requestedAsync = effectiveParams.async ?? deps.asyncByDefault;
+		const backgroundRequestedWhileClarifying = (hasChain || hasTasks) && requestedAsync && effectiveParams.clarify === true;
+		const effectiveAsync = requestedAsync && effectiveParams.clarify !== true;
+		const parentRouting = normalizeForkParentRouting(effectiveParams.parent);
+		const useForkParent = shouldUseForkParent(parentRouting, effectiveAsync);
+		const parentSessionFile = resolveForkParentSessionFile(useForkParent) ?? ctx.sessionManager.getSessionFile() ?? null;
+		const currentSessionId = resolveForkParentSessionId(useForkParent) ?? resolveCurrentSessionId(ctx.sessionManager);
+		deps.state.currentSessionId = currentSessionId;
+		const sessionName = resolveForkParentIntercomTarget(useForkParent) ?? resolveIntercomSessionTarget(deps.pi.getSessionName(), currentSessionId);
 		const intercomBridge = resolveIntercomBridge({
 			config: deps.config.intercomBridge,
 			context: effectiveParams.context,
@@ -2352,10 +2362,6 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		const inheritedNestedRoute = resolveInheritedNestedRouteFromEnv();
 		const nestedParentAddress = inheritedNestedRoute ? resolveNestedParentAddressFromEnv() : undefined;
 		const nestedRoute = inheritedNestedRoute ?? createNestedRoute(runId);
-		const shareEnabled = effectiveParams.share === true;
-		const hasChain = (effectiveParams.chain?.length ?? 0) > 0;
-		const hasTasks = (effectiveParams.tasks?.length ?? 0) > 0;
-		const hasSingle = !hasChain && !hasTasks && Boolean(effectiveParams.agent);
 		const allowClarifyTaskPrompt = hasChain
 			&& effectiveParams.clarify === true
 			&& ctx.hasUI
@@ -2377,9 +2383,6 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		} catch (error) {
 			return toExecutionErrorResult(effectiveParams, error);
 		}
-		const requestedAsync = effectiveParams.async ?? deps.asyncByDefault;
-		const backgroundRequestedWhileClarifying = (hasChain || hasTasks) && requestedAsync && effectiveParams.clarify === true;
-		const effectiveAsync = requestedAsync && effectiveParams.clarify !== true;
 		const controlConfig = resolveControlConfig(deps.config.control, effectiveParams.control);
 
 		const artifactConfig: ArtifactConfig = {

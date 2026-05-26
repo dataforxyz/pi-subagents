@@ -276,6 +276,10 @@ export const SubagentParams = Type.Object({
 		enum: ["fresh", "fork"],
 		description: "'fresh' or 'fork' to branch from parent session. If omitted, any requested agent with defaultContext: 'fork' makes the whole invocation forked; otherwise the default is 'fresh'.",
 	})),
+	parent: Type.Optional(Type.String({
+		enum: ["auto", "main", "current"],
+		description: "Ownership/routing for subagents created inside fork handlers. auto (default) adopts async fork-launched subagents into the inherited main dialog when available while sync runs stay with the current fork; main forces inherited main-dialog ownership; current keeps the subagent owned by the creating fork/session.",
+	})),
 	chainDir: Type.Optional(Type.String({ description: "Persistent directory for chain artifacts. Default: a user-scoped temp directory under <tmpdir>/ (auto-cleaned after 24h)" })),
 	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
 	agentScope: Type.Optional(Type.String({ description: "Agent discovery scope: 'user', 'project', or 'both' (default: 'both'; project wins on name collisions)" })),
