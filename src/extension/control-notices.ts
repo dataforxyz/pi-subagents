@@ -43,11 +43,13 @@ function deliverControlNotice(input: {
 	backgroundForkHandlers?: BackgroundForkHandlersConfig;
 	getParentSessionFile?: () => string | null | undefined;
 	getParentIntercomTarget?: () => string | null | undefined;
+	onActivity?: () => void;
 }): void {
 	const childIntercomTarget = controlNoticeTarget(input.details);
 	const key = controlNotificationKey(input.details.event, childIntercomTarget);
 	if (input.visibleControlNotices.has(key)) return;
 	input.visibleControlNotices.add(key);
+	input.onActivity?.();
 	const noticeText = input.details.noticeText ?? formatControlNoticeMessage(input.details.event, childIntercomTarget);
 	const messageDetails = { ...input.details, childIntercomTarget, noticeText };
 	if (input.details.source !== "foreground") {
@@ -58,7 +60,7 @@ function deliverControlNotice(input: {
 			parentSessionFile: input.getParentSessionFile?.() ?? undefined,
 			parentIntercomTarget: input.getParentIntercomTarget?.() ?? undefined,
 			details: messageDetails,
-		});
+		}, { onActivity: input.onActivity });
 		return;
 	}
 	input.pi.sendMessage(
@@ -89,6 +91,7 @@ export function handleSubagentControlNotice(input: {
 	backgroundForkHandlers?: BackgroundForkHandlersConfig;
 	getParentSessionFile?: () => string | null | undefined;
 	getParentIntercomTarget?: () => string | null | undefined;
+	onActivity?: () => void;
 }): void {
 	if (!input.details?.event || input.details.event.type === "active_long_running") return;
 	if (input.details.source !== "foreground") {

@@ -48,6 +48,7 @@ export default function registerSubagentNotify(
 	backgroundForkHandlers?: BackgroundForkHandlersConfig,
 	getParentSessionFile?: () => string | null | undefined,
 	getParentIntercomTarget?: () => string | null | undefined,
+	onActivity?: () => void,
 ): void {
 	const unsubscribeStoreKey = "__pi_subagents_notify_unsubscribe__";
 	const globalStore = globalThis as Record<string, unknown>;
@@ -73,6 +74,7 @@ export default function registerSubagentNotify(
 		const key = buildCompletionKey(result, "notify");
 		if (markSeenWithTtl(seen, key, now, ttlMs)) return;
 
+		onActivity?.();
 		if (result.resultIntercomDelivered) return;
 
 		const agent = result.agent ?? "unknown";
@@ -116,7 +118,7 @@ export default function registerSubagentNotify(
 			parentSessionFile: getParentSessionFile?.() ?? undefined,
 			parentIntercomTarget: getParentIntercomTarget?.() ?? undefined,
 			details: { agent, status, taskInfo, resultPreview: displaySummary, durationMs: result.durationMs, sessionLabel: sessionLine ? "session" : undefined, sessionValue: result.shareUrl ?? result.sessionFile },
-		});
+		}, { onActivity });
 	};
 
 	const handleStepComplete = (_data: unknown) => {

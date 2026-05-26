@@ -359,6 +359,8 @@ subagent({ action: "doctor" })
 
 Humans can use `/subagents-doctor` for the same read-only report. It checks runtime paths, discovery counts, async support, current session context, and intercom bridge state.
 
+Extension authors that need to know whether a parent is truly ready for more orchestration should prefer `waitForSubagentParentQuiescence(ctx, state, { stableMs })`; use `getSubagentParentActivityStatus(ctx, state)` or `isSubagentParentQuiescent(ctx, state)` only for immediate snapshots. These helpers require the parent agent to be idle, no parent messages queued, no foreground/async subagent runs still queued/running/paused, and no `pi-subagents` background fork handlers for the current parent session still starting/running. The wait helper adds an activity-generation/stable-window barrier so an agent finish followed by a subagent fork reservation does not look ready too early. They intentionally do not count unrelated Pi forks or other sessions.
+
 ### Subagent control
 
 Subagent control is the runtime visibility and intervention layer for delegated runs. It is separate from lifecycle status. Lifecycle status says whether a child is `queued`, `running`, `paused`, `complete`, or `failed`. Activity reporting is factual: it tracks the last observed activity time and the current tool when known. It does not pretend to know that a child is truly stuck.

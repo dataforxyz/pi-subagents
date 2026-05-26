@@ -20,6 +20,7 @@ import { readStatus } from "../../shared/utils.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
+import { markSubagentActivity } from "../../extension/quiescence.ts";
 
 interface AsyncJobTrackerOptions {
 	completionRetentionMs?: number;
@@ -254,6 +255,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 					if (status) {
 						const previousStatus = job.status;
 						job.status = status.state;
+						if (previousStatus !== job.status) markSubagentActivity(state);
 						if (job.status !== "complete" && job.status !== "failed" && job.status !== "paused") cancelCleanup(job.asyncId);
 						job.sessionId = status.sessionId ?? job.sessionId;
 						job.activityState = status.activityState;
@@ -332,6 +334,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		const agents = firstGroupCount && firstGroupCount > 0
 			? rawAgents?.slice(0, firstGroupCount)
 			: rawAgents;
+		markSubagentActivity(state);
 		state.asyncJobs.set(info.id, {
 			asyncId: info.id,
 			asyncDir,
@@ -365,7 +368,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		const job = state.asyncJobs.get(asyncId);
 		let nestedRefreshFailed = false;
 		if (job) {
+			const previousStatus = job.status;
 			job.status = result.success ? "complete" : "failed";
+			if (previousStatus !== job.status) markSubagentActivity(state);
 			job.updatedAt = Date.now();
 			if (result.asyncDir) job.asyncDir = result.asyncDir;
 			try {

@@ -61,8 +61,11 @@ import {
 	SUBAGENT_CONTROL_MESSAGE_TYPE,
 	type SubagentControlMessageDetails,
 } from "./control-notices.ts";
+import { markSubagentActivity } from "./quiescence.ts";
 
 export { loadConfig } from "./config.ts";
+export { getSubagentParentActivityStatus, getSubagentActivityGeneration, isSubagentParentQuiescent, markSubagentActivity, waitForSubagentParentQuiescence } from "./quiescence.ts";
+export type { ActiveSubagentRunSummary, SubagentParentActivityOptions, SubagentParentActivityStatus, WaitForSubagentParentQuiescenceOptions } from "./quiescence.ts";
 
 /**
  * Derive subagent session base directory from parent session file.
@@ -503,7 +506,8 @@ DIAGNOSTICS:
 		if (sessionName) return sessionName;
 		return state.lastUiContext?.sessionManager.getSessionId() ?? state.currentSessionId ?? undefined;
 	};
-	registerSubagentNotify(pi, config.backgroundForkHandlers, getParentSessionFile, getParentIntercomTarget);
+	const markActivity = () => { markSubagentActivity(state); };
+	registerSubagentNotify(pi, config.backgroundForkHandlers, getParentSessionFile, getParentIntercomTarget, markActivity);
 
 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
 	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();
@@ -517,9 +521,11 @@ DIAGNOSTICS:
 			backgroundForkHandlers: config.backgroundForkHandlers,
 			getParentSessionFile,
 			getParentIntercomTarget,
+			onActivity: markActivity,
 		});
 	};
 	const lowWatermarkHandler = (payload: unknown) => {
+		markActivity();
 		const details = payload as SubagentLowWatermarkEvent;
 		const content = details.message || `Subagent pool low-watermark reached for run ${details.runId}.`;
 		pi.sendMessage(

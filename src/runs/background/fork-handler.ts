@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildForkHandlerEnv, buildForkRunPaths, getForkHandlersFile, getForkStateDir, launchDetachedFork } from "../../shared/fork-runtime.ts";
 import { SUBAGENT_CHILD_ENV } from "../shared/pi-args.ts";
@@ -64,6 +65,26 @@ function handlersFile(): string {
 
 const SUMMARY_LIMIT_BYTES = 16 * 1024;
 const MAX_PERSISTED_HANDLERS = 200;
+const STARTING_HANDLER_RECONCILE_GRACE_MS = 5_000;
+const HANDLERS_LOCK_TIMEOUT_MS = 5_000;
+const HANDLERS_LOCK_STALE_MS = 30_000;
+const HANDLERS_LOCK_RETRY_MS = 25;
+
+const activeBackgroundForkReservations = new Map<string, BackgroundForkRun>();
+let persistedRunsQueue: Promise<void> = Promise.resolve();
+
+export interface BackgroundForkRunSummary {
+	id: string;
+	type: SubagentBackgroundForkEvent["type"];
+	title: string;
+	cwd: string;
+	dir: string;
+	status?: BackgroundForkRun["status"];
+	startedAt?: number;
+	endedAt?: number;
+	pid?: number;
+	parentSessionFile?: string;
+}
 
 function truncateText(text: string, limitBytes: number): string {
 	const bytes = Buffer.byteLength(text, "utf8");
@@ -116,18 +137,71 @@ async function writePersistedRuns(runs: BackgroundForkRun[]): Promise<void> {
 	await fs.promises.rename(tmp, filePath);
 }
 
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquirePersistedRunsLock(): Promise<() => Promise<void>> {
+	await fs.promises.mkdir(stateDir(), { recursive: true });
+	const lockPath = `${handlersFile()}.lock`;
+	const startedAt = Date.now();
+	while (true) {
+		try {
+			const handle = await fs.promises.open(lockPath, "wx");
+			await handle.writeFile(`${process.pid}\n${Date.now()}\n`, "utf8");
+			return async () => {
+				await handle.close().catch(() => {});
+				await fs.promises.unlink(lockPath).catch(() => {});
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			try {
+				const stat = await fs.promises.stat(lockPath);
+				if (Date.now() - stat.mtimeMs > HANDLERS_LOCK_STALE_MS) {
+					await fs.promises.unlink(lockPath).catch(() => {});
+					continue;
+				}
+			} catch (statError) {
+				if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+				continue;
+			}
+			if (Date.now() - startedAt > HANDLERS_LOCK_TIMEOUT_MS) {
+				throw new Error(`Timed out waiting for subagent background fork handler state lock: ${lockPath}`);
+			}
+			await delay(HANDLERS_LOCK_RETRY_MS);
+		}
+	}
+}
+
+async function withPersistedRunsLock<T>(operation: () => Promise<T>): Promise<T> {
+	const queued = persistedRunsQueue.catch(() => {}).then(async () => {
+		const release = await acquirePersistedRunsLock();
+		try {
+			return await operation();
+		} finally {
+			await release();
+		}
+	});
+	persistedRunsQueue = queued.then(() => {}, () => {});
+	return queued;
+}
+
 async function persistRun(run: BackgroundForkRun): Promise<void> {
-	const runs = await readPersistedRuns();
-	const next = [...runs.filter((candidate) => candidate.id !== run.id), run];
-	await writePersistedRuns(next);
+	await withPersistedRunsLock(async () => {
+		const runs = await readPersistedRuns();
+		const next = [...runs.filter((candidate) => candidate.id !== run.id), run];
+		await writePersistedRuns(next);
+	});
 }
 
 async function patchPersistedRun(id: string, patch: Partial<BackgroundForkRun>): Promise<void> {
-	const runs = await readPersistedRuns();
-	const index = runs.findIndex((candidate) => candidate.id === id);
-	if (index === -1) return;
-	runs[index] = { ...runs[index]!, ...patch };
-	await writePersistedRuns(runs);
+	await withPersistedRunsLock(async () => {
+		const runs = await readPersistedRuns();
+		const index = runs.findIndex((candidate) => candidate.id === id);
+		if (index === -1) return;
+		runs[index] = { ...runs[index]!, ...patch };
+		await writePersistedRuns(runs);
+	});
 }
 
 function isProcessAlive(pid: number | undefined): boolean {
@@ -140,28 +214,86 @@ function isProcessAlive(pid: number | undefined): boolean {
 	}
 }
 
+function normalizeSessionFile(file: string | null | undefined): string | undefined {
+	if (!file || !file.trim()) return undefined;
+	return path.resolve(file);
+}
+
+function isActiveForkRun(run: BackgroundForkRun): boolean {
+	return run.status === "starting" || run.status === "running";
+}
+
+function reserveBackgroundForkRun(run: BackgroundForkRun): void {
+	if (isActiveForkRun(run)) activeBackgroundForkReservations.set(run.id, run);
+}
+
+function releaseBackgroundForkRun(id: string): void {
+	activeBackgroundForkReservations.delete(id);
+}
+
+function activeReservationsForParent(normalizedParentSessionFile: string): BackgroundForkRun[] {
+	return Array.from(activeBackgroundForkReservations.values()).filter(
+		(run) => isActiveForkRun(run) && normalizeSessionFile(run.parentSessionFile) === normalizedParentSessionFile,
+	);
+}
+
+function summarizeForkRun(run: BackgroundForkRun): BackgroundForkRunSummary {
+	return {
+		id: run.id,
+		type: run.type,
+		title: run.title,
+		cwd: run.cwd,
+		dir: run.dir,
+		status: run.status,
+		startedAt: run.startedAt,
+		endedAt: run.endedAt,
+		pid: run.pid,
+		parentSessionFile: run.parentSessionFile,
+	};
+}
+
 export async function reconcileBackgroundForkRuns(): Promise<number> {
-	const runs = await readPersistedRuns();
-	let changed = 0;
-	const now = Date.now();
-	const next = runs.map((run) => {
-		if (run.status !== "starting" && run.status !== "running") return run;
-		if (run.status === "running" && isProcessAlive(run.pid)) return run;
-		const stderr = fs.existsSync(run.stderrPath) ? fs.readFileSync(run.stderrPath, "utf8") : "";
-		const status = run.status === "starting" || stderr.trim() ? "failed" : "complete";
-		changed += 1;
-		return {
-			...run,
-			status,
-			endedAt: run.endedAt ?? now,
-			exitCode: run.exitCode ?? null,
-			signal: run.signal ?? null,
-			finishSource: "reconciled" as const,
-			...(status === "failed" ? { error: run.error || stderr.trim() || "handler was still starting when reconciliation found no live pid" } : {}),
-		};
+	return await withPersistedRunsLock(async () => {
+		const runs = await readPersistedRuns();
+		let changed = 0;
+		const now = Date.now();
+		const next = runs.map((run) => {
+			if (run.status !== "starting" && run.status !== "running") return run;
+			if (run.status === "running" && isProcessAlive(run.pid)) return run;
+			if (run.status === "starting" && !run.pid && now - (run.startedAt ?? now) < STARTING_HANDLER_RECONCILE_GRACE_MS) return run;
+			const stderr = fs.existsSync(run.stderrPath) ? fs.readFileSync(run.stderrPath, "utf8") : "";
+			const status = run.status === "starting" || stderr.trim() ? "failed" : "complete";
+			changed += 1;
+			return {
+				...run,
+				status,
+				endedAt: run.endedAt ?? now,
+				exitCode: run.exitCode ?? null,
+				signal: run.signal ?? null,
+				finishSource: "reconciled" as const,
+				...(status === "failed" ? { error: run.error || stderr.trim() || "handler was still starting when reconciliation found no live pid" } : {}),
+			};
+		});
+		if (changed > 0) await writePersistedRuns(next);
+		return changed;
 	});
-	if (changed > 0) await writePersistedRuns(next);
-	return changed;
+}
+
+export async function listActiveBackgroundForkRunsForParent(parentSessionFile: string | null | undefined): Promise<BackgroundForkRunSummary[]> {
+	const normalizedParentSessionFile = normalizeSessionFile(parentSessionFile);
+	if (!normalizedParentSessionFile) return [];
+	await reconcileBackgroundForkRuns();
+	const runs = await readPersistedRuns();
+	const activeById = new Map<string, BackgroundForkRun>();
+	for (const run of runs) {
+		if (isActiveForkRun(run) && normalizeSessionFile(run.parentSessionFile) === normalizedParentSessionFile) activeById.set(run.id, run);
+	}
+	for (const run of activeReservationsForParent(normalizedParentSessionFile)) activeById.set(run.id, run);
+	return Array.from(activeById.values()).map(summarizeForkRun);
+}
+
+export async function hasActiveBackgroundForkRunsForParent(parentSessionFile: string | null | undefined): Promise<boolean> {
+	return (await listActiveBackgroundForkRunsForParent(parentSessionFile)).length > 0;
 }
 
 export function resolveBackgroundForkHandlersConfig(config?: BackgroundForkHandlersConfig): ResolvedBackgroundForkHandlersConfig {
@@ -282,38 +414,42 @@ export async function deliverBackgroundForkEvent(
 	pi: Pick<ExtensionAPI, "sendMessage">,
 	config: BackgroundForkHandlersConfig | undefined,
 	event: SubagentBackgroundForkEvent,
+	options: { onActivity?: () => void } = {},
 ): Promise<void> {
 	const resolved = resolveBackgroundForkHandlersConfig(config);
-	void reconcileBackgroundForkRuns().catch((error) => {
-		console.error("[pi-subagents] Failed to reconcile background fork handlers:", error);
-	});
 	if (!resolved.enabled) {
+		options.onActivity?.();
 		sendFallback(pi, event);
 		return;
 	}
 
-	let run: BackgroundForkRun | undefined;
-	try {
-		run = (() => {
-			const id = makeRunId(event);
-			return {
-				...buildForkRunPaths("subagents", id),
-				type: event.type,
-				title: event.title,
-				cwd: event.cwd ?? process.cwd(),
-				status: "starting",
-				startedAt: Date.now(),
-				...(event.parentSessionFile ? { parentSessionFile: event.parentSessionFile } : {}),
-				...(event.parentIntercomTarget ? { parentIntercomTarget: event.parentIntercomTarget } : {}),
-				notify: resolved.notify,
-				triggerParentOnSummary: resolved.triggerParentOnSummary,
-			};
-		})();
+	const run: BackgroundForkRun = (() => {
+		const id = makeRunId(event);
+		return {
+			...buildForkRunPaths("subagents", id),
+			type: event.type,
+			title: event.title,
+			cwd: event.cwd ?? process.cwd(),
+			status: "starting",
+			startedAt: Date.now(),
+			...(event.parentSessionFile ? { parentSessionFile: event.parentSessionFile } : {}),
+			...(event.parentIntercomTarget ? { parentIntercomTarget: event.parentIntercomTarget } : {}),
+			notify: resolved.notify,
+			triggerParentOnSummary: resolved.triggerParentOnSummary,
+		};
+	})();
+	reserveBackgroundForkRun(run);
+	options.onActivity?.();
+	void reconcileBackgroundForkRuns().catch((error) => {
+		console.error("[pi-subagents] Failed to reconcile background fork handlers:", error);
+	});
 
+	try {
 		await fs.promises.mkdir(run.sessionDir, { recursive: true });
 		await fs.promises.writeFile(run.eventPath, `${JSON.stringify(event, null, 2)}\n`, "utf8");
 		await fs.promises.writeFile(run.promptPath, buildPrompt(event, run), "utf8");
 		await persistRun(run);
+		options.onActivity?.();
 
 		const baseArgs = [
 			"-p",
@@ -333,20 +469,38 @@ export async function deliverBackgroundForkEvent(
 			stderrPath: run.stderrPath,
 			env: buildForkHandlerEnv("subagents", run.id, { ...process.env, [SUBAGENT_CHILD_ENV]: "1" }),
 			onClose: (code, signal) => {
+				options.onActivity?.();
 				const status = code === 0 ? "complete" : "failed";
-				void patchPersistedRun(run!.id, { status, endedAt: Date.now(), exitCode: code, signal, finishSource: "close" }).catch((error) => {
-					console.error("[pi-subagents] Failed to persist background fork handler completion:", error);
-				});
+				run.status = status;
+				run.endedAt = Date.now();
+				run.exitCode = code;
+				run.signal = signal;
+				run.finishSource = "close";
+				void patchPersistedRun(run.id, { status, endedAt: run.endedAt, exitCode: code, signal, finishSource: "close" })
+					.catch((error) => {
+						console.error("[pi-subagents] Failed to persist background fork handler completion:", error);
+					})
+					.finally(() => {
+						releaseBackgroundForkRun(run.id);
+						options.onActivity?.();
+					});
 				if (resolved.notify !== "summary" && resolved.notify !== "ack-and-summary") return;
 				pi.sendMessage(
-					{ customType: "subagent-fork-handler", content: formatSummary(run!, status, code, signal), display: true, details: { id: run!.id, type: run!.type, status, dir: run!.dir, pid: run!.pid, exitCode: code, signal } },
+					{ customType: "subagent-fork-handler", content: formatSummary(run, status, code, signal), display: true, details: { id: run.id, type: run.type, status, dir: run.dir, pid: run.pid, exitCode: code, signal } },
 					{ triggerTurn: resolved.triggerParentOnSummary },
 				);
 			},
 		});
 		if (!launch.ok) {
 			const message = launch.error instanceof Error ? launch.error.message : String(launch.error);
-			await patchPersistedRun(run.id, { status: "failed", endedAt: Date.now(), error: message });
+			run.status = "failed";
+			run.endedAt = Date.now();
+			run.error = message;
+			await patchPersistedRun(run.id, { status: "failed", endedAt: run.endedAt, error: message }).catch((error) => {
+				console.error("[pi-subagents] Failed to persist background fork handler launch failure:", error);
+			});
+			releaseBackgroundForkRun(run.id);
+			options.onActivity?.();
 			console.error("[pi-subagents] Failed to launch background fork handler:", launch.error);
 			sendFallback(pi, event);
 			return;
@@ -354,6 +508,7 @@ export async function deliverBackgroundForkEvent(
 		run.pid = launch.pid;
 		run.status = "running";
 		await patchPersistedRun(run.id, { pid: launch.pid, status: "running" });
+		options.onActivity?.();
 		if (resolved.notify === "ack-and-summary") {
 			pi.sendMessage(
 				{ customType: "subagent-fork-handler", content: formatAck(run), display: true, details: { id: run.id, type: run.type, status: "running", dir: run.dir, pid: run.pid } },
@@ -361,7 +516,14 @@ export async function deliverBackgroundForkEvent(
 			);
 		}
 	} catch (error) {
-		if (run) await patchPersistedRun(run.id, { status: "failed", endedAt: Date.now(), error: error instanceof Error ? error.message : String(error) });
+		run.status = "failed";
+		run.endedAt = Date.now();
+		run.error = error instanceof Error ? error.message : String(error);
+		await patchPersistedRun(run.id, { status: "failed", endedAt: run.endedAt, error: run.error }).catch((patchError) => {
+			console.error("[pi-subagents] Failed to persist background fork handler startup failure:", patchError);
+		});
+		releaseBackgroundForkRun(run.id);
+		options.onActivity?.();
 		console.error("[pi-subagents] Failed to start background fork handler:", error);
 		sendFallback(pi, event);
 	}

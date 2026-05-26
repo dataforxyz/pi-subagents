@@ -12,6 +12,7 @@ import { resolveExecutionAgentScope } from "../../agents/agent-scope.ts";
 import { handleManagementAction } from "../../agents/agent-management.ts";
 import { buildDoctorReport } from "../../extension/doctor.ts";
 import { clearPendingForegroundControlNotices } from "../../extension/control-notices.ts";
+import { markSubagentActivity } from "../../extension/quiescence.ts";
 import { runSync } from "./execution.ts";
 import { resolveModelCandidate } from "../shared/model-fallback.ts";
 import { aggregateParallelOutputs } from "../shared/parallel-utils.ts";
@@ -2462,6 +2463,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (foregroundControl) {
 			deps.state.foregroundControls.set(runId, foregroundControl);
 			deps.state.lastForegroundControlId = runId;
+			markSubagentActivity(deps.state);
 		}
 
 		const writeNestedForegroundEvent = (type: "subagent.nested.started" | "subagent.nested.completed", result?: AgentToolResult<Details>): void => {
@@ -2554,6 +2556,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			if (foregroundControl) {
 				clearPendingForegroundControlNotices(deps.state, runId);
 				deps.state.foregroundControls.delete(runId);
+				markSubagentActivity(deps.state);
 				if (deps.state.lastForegroundControlId === runId) {
 					deps.state.lastForegroundControlId = null;
 				}

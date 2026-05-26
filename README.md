@@ -969,6 +969,8 @@ Fields:
 - `triggerParentOnSummary`: default `true`; final summaries start a parent turn so the creator is notified when async work finishes.
 - `piCommand`: optional Pi executable override for tests or custom installs.
 
+Extensions that coordinate around subagent completion can import `getSubagentParentActivityStatus(ctx, state)`, `isSubagentParentQuiescent(ctx, state)`, or `waitForSubagentParentQuiescence(ctx, state, { stableMs })` from `src/extension/index.ts`. The snapshot helpers report quiescence only when the parent agent is idle, no parent messages are queued, no foreground/async subagent runs in this extension instance are queued/running/paused, and no `pi-subagents` background fork handlers for the current parent session file are still starting/running. The wait helper adds an in-process activity generation counter plus a stable debounce window, so an agent finish immediately followed by a subagent fork-handler reservation does not look ready too early. Fork-handler checks are scoped to the current parent session file so unrelated Pi forks, return_on handlers, intercom handlers, and other sessions do not block readiness.
+
 ### `worktreeSetupHook`
 
 ```json
