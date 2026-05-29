@@ -258,6 +258,27 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 0);
 	});
 
+	it("auto background fork delivery wakes an idle parent directly", async () => {
+		const sent: Array<{ message: unknown; options: unknown }> = [];
+		const pi = {
+			sendMessage(message: unknown, options: unknown) {
+				sent.push({ message, options });
+			},
+		};
+
+		await deliverBackgroundForkEvent(pi as never, { enabled: true, mode: "auto" }, {
+			type: "async-complete",
+			title: "Background task completed: worker",
+			content: "Background task completed: **worker**\n\nDone",
+		}, {
+			getContext: () => ({ isIdle: () => true, hasPendingMessages: () => false } as never),
+		});
+
+		assert.equal(sent.length, 1);
+		assert.equal((sent[0] as any).message.customType, "subagent-notify");
+		assert.deepEqual((sent[0] as any).options, { triggerTurn: true });
+	});
+
 	it("falls back without throwing when fork setup serialization fails", async () => {
 		const sent: Array<{ message: unknown; options: unknown }> = [];
 		const pi = {

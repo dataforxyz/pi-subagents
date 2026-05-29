@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { deliverBackgroundForkEvent } from "../runs/background/fork-handler.ts";
 import { controlNotificationKey, formatControlNoticeMessage } from "../runs/shared/subagent-control.ts";
 import type { BackgroundForkHandlersConfig, ControlEvent, SubagentState } from "../shared/types.ts";
@@ -44,6 +44,7 @@ function deliverControlNotice(input: {
 	getParentSessionFile?: () => string | null | undefined;
 	getParentIntercomTarget?: () => string | null | undefined;
 	onActivity?: () => void;
+	getContext?: () => ExtensionContext | undefined;
 }): void {
 	const childIntercomTarget = controlNoticeTarget(input.details);
 	const key = controlNotificationKey(input.details.event, childIntercomTarget);
@@ -60,7 +61,7 @@ function deliverControlNotice(input: {
 			parentSessionFile: input.getParentSessionFile?.() ?? undefined,
 			parentIntercomTarget: input.getParentIntercomTarget?.() ?? undefined,
 			details: messageDetails,
-		}, { onActivity: input.onActivity });
+		}, { onActivity: input.onActivity, getContext: input.getContext });
 		return;
 	}
 	input.pi.sendMessage(
@@ -92,6 +93,7 @@ export function handleSubagentControlNotice(input: {
 	getParentSessionFile?: () => string | null | undefined;
 	getParentIntercomTarget?: () => string | null | undefined;
 	onActivity?: () => void;
+	getContext?: () => ExtensionContext | undefined;
 }): void {
 	if (!input.details?.event || input.details.event.type === "active_long_running") return;
 	if (input.details.source !== "foreground") {

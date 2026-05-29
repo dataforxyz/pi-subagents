@@ -142,7 +142,7 @@ function formatRuntimeConfigLines(input: DoctorReportInput, deps: DoctorDeps): s
 		`- asyncByDefault: ${input.config.asyncByDefault === true}`,
 		`- forceTopLevelAsync: ${input.config.forceTopLevelAsync === true}`,
 		`- maxSubagentDepth: ${input.config.maxSubagentDepth ?? "default"}`,
-		`- background fork handlers: ${backgroundForkHandlers.enabled ? "enabled" : "disabled"}; notify=${backgroundForkHandlers.notify}; triggerParentOnSummary=${backgroundForkHandlers.triggerParentOnSummary}`,
+		`- background fork handlers: ${backgroundForkHandlers.enabled ? "enabled" : "disabled"}; mode=${backgroundForkHandlers.mode}; notify=${backgroundForkHandlers.notify}; triggerParentOnSummary=${backgroundForkHandlers.triggerParentOnSummary}`,
 	];
 }
 

@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildForkHandlerEnv, buildForkRunPaths, getForkHandlersFile, getForkStateDir, launchDetachedFork } from "../../shared/fork-runtime.ts";
 import { SUBAGENT_CHILD_ENV } from "../shared/pi-args.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
@@ -10,6 +10,7 @@ export type BackgroundForkHandlerNotify = "ack-and-summary" | "summary" | "none"
 
 export interface ResolvedBackgroundForkHandlersConfig {
 	enabled: boolean;
+	mode: "auto" | "always";
 	notify: BackgroundForkHandlerNotify;
 	triggerParentOnSummary: boolean;
 	piCommand?: string;
@@ -299,6 +300,7 @@ export async function hasActiveBackgroundForkRunsForParent(parentSessionFile: st
 export function resolveBackgroundForkHandlersConfig(config?: BackgroundForkHandlersConfig): ResolvedBackgroundForkHandlersConfig {
 	return {
 		enabled: config?.enabled ?? true,
+		mode: config?.mode ?? "auto",
 		notify: config?.notify ?? "summary",
 		triggerParentOnSummary: config?.triggerParentOnSummary ?? true,
 		...(config?.piCommand ? { piCommand: config.piCommand } : {}),
@@ -410,14 +412,28 @@ function sendFallback(pi: Pick<ExtensionAPI, "sendMessage">, event: SubagentBack
 	);
 }
 
+function contextCanWakeParentDirect(ctx: ExtensionContext | undefined): boolean {
+	if (!ctx) return false;
+	try {
+		return ctx.isIdle() && !ctx.hasPendingMessages();
+	} catch {
+		return false;
+	}
+}
+
 export async function deliverBackgroundForkEvent(
 	pi: Pick<ExtensionAPI, "sendMessage">,
 	config: BackgroundForkHandlersConfig | undefined,
 	event: SubagentBackgroundForkEvent,
-	options: { onActivity?: () => void } = {},
+	options: { onActivity?: () => void; getContext?: () => ExtensionContext | undefined } = {},
 ): Promise<void> {
 	const resolved = resolveBackgroundForkHandlersConfig(config);
 	if (!resolved.enabled) {
+		options.onActivity?.();
+		sendFallback(pi, event);
+		return;
+	}
+	if (resolved.mode === "auto" && contextCanWakeParentDirect(options.getContext?.()) && !(await hasActiveBackgroundForkRunsForParent(event.parentSessionFile))) {
 		options.onActivity?.();
 		sendFallback(pi, event);
 		return;

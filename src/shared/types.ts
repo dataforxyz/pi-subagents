@@ -831,8 +831,11 @@ export interface IntercomBridgeConfig {
 
 export type BackgroundForkHandlerNotify = "ack-and-summary" | "summary" | "none";
 
+export type BackgroundForkHandlerMode = "auto" | "always";
+
 export interface BackgroundForkHandlersConfig {
 	enabled?: boolean;
+	mode?: BackgroundForkHandlerMode;
 	notify?: BackgroundForkHandlerNotify;
 	triggerParentOnSummary?: boolean;
 	piCommand?: string;

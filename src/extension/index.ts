@@ -507,7 +507,7 @@ DIAGNOSTICS:
 		return state.lastUiContext?.sessionManager.getSessionId() ?? state.currentSessionId ?? undefined;
 	};
 	const markActivity = () => { markSubagentActivity(state); };
-	registerSubagentNotify(pi, config.backgroundForkHandlers, getParentSessionFile, getParentIntercomTarget, markActivity);
+	registerSubagentNotify(pi, config.backgroundForkHandlers, getParentSessionFile, getParentIntercomTarget, markActivity, () => state.lastUiContext);
 
 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
 	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();
@@ -522,6 +522,7 @@ DIAGNOSTICS:
 			getParentSessionFile,
 			getParentIntercomTarget,
 			onActivity: markActivity,
+			getContext: () => state.lastUiContext,
 		});
 	};
 	const lowWatermarkHandler = (payload: unknown) => {

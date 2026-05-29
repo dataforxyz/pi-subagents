@@ -2,7 +2,7 @@
  * Subagent completion notifications.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildCompletionKey, getGlobalSeenMap, markSeenWithTtl } from "./completion-dedupe.ts";
 import { deliverBackgroundForkEvent, reconcileBackgroundForkRuns } from "./fork-handler.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_ASYNC_STEP_COMPLETE_EVENT, type BackgroundForkHandlersConfig } from "../../shared/types.ts";
@@ -49,6 +49,7 @@ export default function registerSubagentNotify(
 	getParentSessionFile?: () => string | null | undefined,
 	getParentIntercomTarget?: () => string | null | undefined,
 	onActivity?: () => void,
+	getContext?: () => ExtensionContext | undefined,
 ): void {
 	const unsubscribeStoreKey = "__pi_subagents_notify_unsubscribe__";
 	const globalStore = globalThis as Record<string, unknown>;
@@ -118,7 +119,7 @@ export default function registerSubagentNotify(
 			parentSessionFile: getParentSessionFile?.() ?? undefined,
 			parentIntercomTarget: getParentIntercomTarget?.() ?? undefined,
 			details: { agent, status, taskInfo, resultPreview: displaySummary, durationMs: result.durationMs, sessionLabel: sessionLine ? "session" : undefined, sessionValue: result.shareUrl ?? result.sessionFile },
-		}, { onActivity });
+		}, { onActivity, getContext });
 	};
 
 	const handleStepComplete = (_data: unknown) => {

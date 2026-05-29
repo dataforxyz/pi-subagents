@@ -952,19 +952,21 @@ The default injected guidance tells children to use `contact_supervisor` with `r
 {
   "backgroundForkHandlers": {
     "enabled": true,
+    "mode": "auto",
     "notify": "summary",
     "triggerParentOnSummary": true
   }
 }
 ```
 
-Async subagent completions and async control notices default to a sibling Pi handler, and the final handler summary wakes the parent so the creator knows the run finished or needs attention. Successful and failed per-step completion records are coalesced into the aggregate async completion handler to avoid duplicate step + final summaries; actionable in-progress problems should use control notices. The parent receives final summaries by default; set `notify: "ack-and-summary"` if launch acknowledgements are also needed, set `triggerParentOnSummary: false` only when summaries should remain display-only, or set `notify: "none"` to keep handler summaries in logs only. Set `enabled: false` to opt out of sibling handling; fallback completion/control delivery still wakes the parent.
+Async subagent completions and async control notices default to `mode: "auto"`: wake the idle parent directly when there are no queued parent messages or active subagent background fork handlers for that parent session, otherwise route through a sibling Pi handler. The final handler summary wakes the parent so the creator knows the run finished or needs attention. Successful and failed per-step completion records are coalesced into the aggregate async completion handler to avoid duplicate step + final summaries; actionable in-progress problems should use control notices. Set `mode: "always"` to always use sibling handlers when enabled. The parent receives final summaries by default; set `notify: "ack-and-summary"` if launch acknowledgements are also needed, set `triggerParentOnSummary: false` only when summaries should remain display-only, or set `notify: "none"` to keep handler summaries in logs only. Set `enabled: false` to opt out of sibling handling; fallback completion/control delivery still wakes the parent.
 
 Routine-success handler receipts are compacted before model context is built so repeated background summaries do not bloat later turns. Compaction is conservative: the receipt must show success/exit 0, a usable `Output:` log path with byte size, an absent or empty `Errors:` line, and no inline blocker/action-required markers. Handler id, exit, Output/Errors pointers, byte sizes, and a few summary lines stay inline. Failed receipts, blocker/action-required receipts, non-empty stderr, missing/unavailable output logs, and already-compacted receipts are left unchanged.
 
 Fields:
 
-- `enabled`: default `true`; route interrupting background notifications through a sibling handler.
+- `enabled`: default `true`; route interrupting background notifications through auto/direct or sibling handler delivery.
+- `mode`: default `auto`; wake an idle parent directly, or use `always` to always fork when enabled.
 - `notify`: default `summary`; accepts `ack-and-summary`, `summary`, or `none`.
 - `triggerParentOnSummary`: default `true`; final summaries start a parent turn so the creator is notified when async work finishes.
 - `piCommand`: optional Pi executable override for tests or custom installs.

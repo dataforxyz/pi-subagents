@@ -117,7 +117,7 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /- asyncByDefault: true/);
 			assert.match(report, /- forceTopLevelAsync: true/);
 			assert.match(report, /- maxSubagentDepth: 3/);
-			assert.match(report, /- background fork handlers: enabled; notify=summary; triggerParentOnSummary=false/);
+			assert.match(report, /- background fork handlers: enabled; mode=auto; notify=summary; triggerParentOnSummary=false/);
 			assert.match(report, /- configured session dir: .*subagent-sessions/);
 			assert.match(report, /- current session file: .*parent\.jsonl/);
 			assert.match(report, /- temp root: ok /);
@@ -172,7 +172,7 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /- package git: failed — Error: git exploded/);
 			assert.match(report, /- asyncByDefault: false/);
 			assert.match(report, /- forceTopLevelAsync: false/);
-			assert.match(report, /- background fork handlers: enabled; notify=summary; triggerParentOnSummary=true/);
+			assert.match(report, /- background fork handlers: enabled; mode=auto; notify=summary; triggerParentOnSummary=true/);
 			assert.match(report, /- async runs: failed .*Error: not a directory:/);
 			assert.match(report, /- results: missing /);
 			assert.match(report, /- agents\/chains: failed — Error: discovery exploded/);
