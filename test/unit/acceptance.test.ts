@@ -41,6 +41,9 @@ function tempRepo(): string {
 describe("acceptance gates", () => {
 	it("infers different policies for reviewer, writer, async writer, and dynamic contexts", () => {
 		assert.equal(resolveEffectiveAcceptance({ agentName: "reviewer", task: "Review-only. Do not edit.", mode: "single" }).level, "attested");
+		const asyncReviewer = resolveEffectiveAcceptance({ agentName: "reviewer", task: "Post-review fix pass; review only and report findings", mode: "single", async: true });
+		assert.equal(asyncReviewer.level, "attested");
+		assert.deepEqual(asyncReviewer.evidence, ["review-findings", "residual-risks"]);
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single" }).level, "checked");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true }).level, "reviewed");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Fix each item", mode: "chain", dynamic: true }).level, "reviewed");

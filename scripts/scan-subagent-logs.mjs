@@ -3,8 +3,48 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const uid = typeof process.getuid === "function" ? process.getuid() : "unknown";
-const defaultRoot = path.join(os.tmpdir(), `pi-subagents-uid-${uid}`, "async-subagent-runs");
+function sanitizeTempScopeSegment(value) {
+  const sanitized = String(value)
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return sanitized || "unknown";
+}
+
+function resolveTempScopeId() {
+  if (typeof process.getuid === "function") return `uid-${process.getuid()}`;
+  for (const key of ["USERNAME", "USER", "LOGNAME"]) {
+    const value = process.env[key];
+    if (value) return `user-${sanitizeTempScopeSegment(value)}`;
+  }
+  try {
+    const username = os.userInfo()?.username;
+    if (username) return `user-${sanitizeTempScopeSegment(username)}`;
+  } catch {
+    // Fall through to home-directory-based scoping.
+  }
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (home) return `home-${sanitizeTempScopeSegment(home)}`;
+  try {
+    const fallbackHome = os.homedir();
+    if (fallbackHome) return `home-${sanitizeTempScopeSegment(fallbackHome)}`;
+  } catch {
+    // Fall through to shared scope.
+  }
+  return "shared";
+}
+
+function resolveTempRootBase() {
+  const explicit = process.env.PI_SUBAGENTS_TMPDIR || process.env.TMPDIR;
+  if (explicit) return path.resolve(explicit);
+  const home = process.env.HOME || (() => {
+    try { return os.homedir(); } catch { return ""; }
+  })();
+  if (home) return path.join(home, "tmp");
+  return os.tmpdir();
+}
+
+const defaultRoot = path.join(resolveTempRootBase(), `pi-subagents-${resolveTempScopeId()}`, "async-subagent-runs");
 const defaultState = path.join(os.homedir(), ".cache", "pi-subagents-log-scan.json");
 
 const args = process.argv.slice(2);
