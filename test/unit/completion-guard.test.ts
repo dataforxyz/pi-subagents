@@ -100,7 +100,7 @@ test("review-only, research, and framework output instructions do not expect mut
 	assert.equal(expectsImplementationMutation("worker", "Update a summary"), false);
 	assert.equal(expectsImplementationMutation("worker", "Write to {chain_dir}"), false);
 	assert.equal(
-		expectsImplementationMutation("worker", "Do async work\nUpdate progress at: /tmp/progress.md\nWrite your findings to: /tmp/out.md"),
+		expectsImplementationMutation("worker", "Do async work\nUpdate progress at: /tmp/progress.md\n**Output:**\nWrite your findings to exactly this path: /tmp/out.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere."),
 		false,
 	);
 });

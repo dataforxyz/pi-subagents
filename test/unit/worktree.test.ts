@@ -110,6 +110,42 @@ describe("worktree", () => {
 		}
 	});
 
+	it("creates worktrees under a configured base directory", () => {
+		const repoDir = createRepo("pi-worktree-base-dir-");
+		const baseDir = path.join(os.tmpdir(), `pi-worktree-base-${Date.now().toString(36)}`, "nested");
+		let setup: WorktreeSetup | undefined;
+		try {
+			setup = createWorktrees(repoDir, "base-dir", 1, { baseDir });
+			assert.equal(setup.worktrees[0]!.path, path.join(baseDir, "pi-worktree-base-dir-0"));
+			assert.ok(fs.existsSync(baseDir), "configured base directory should be created");
+		} finally {
+			if (setup) cleanupWorktrees(setup);
+			cleanupRepo(repoDir);
+			fs.rmSync(path.dirname(baseDir), { recursive: true, force: true });
+		}
+	});
+
+	it("uses PI_SUBAGENTS_WORKTREE_DIR when no base directory is configured", () => {
+		const repoDir = createRepo("pi-worktree-env-base-dir-");
+		const previous = process.env.PI_SUBAGENTS_WORKTREE_DIR;
+		const baseDir = path.join(os.tmpdir(), `pi-worktree-env-base-${Date.now().toString(36)}`);
+		let setup: WorktreeSetup | undefined;
+		try {
+			process.env.PI_SUBAGENTS_WORKTREE_DIR = baseDir;
+			setup = createWorktrees(repoDir, "env-base-dir", 1);
+			assert.equal(setup.worktrees[0]!.path, path.join(baseDir, "pi-worktree-env-base-dir-0"));
+		} finally {
+			if (setup) cleanupWorktrees(setup);
+			if (previous === undefined) {
+				delete process.env.PI_SUBAGENTS_WORKTREE_DIR;
+			} else {
+				process.env.PI_SUBAGENTS_WORKTREE_DIR = previous;
+			}
+			cleanupRepo(repoDir);
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
 	it("createWorktrees rejects dirty repositories", () => {
 		const repoDir = createRepo("pi-worktree-dirty-");
 		try {

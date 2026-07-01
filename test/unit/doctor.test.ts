@@ -76,6 +76,7 @@ describe("buildDoctorReport", () => {
 				orchestratorTarget: "subagent-chat-abc123",
 				expandTilde: (value) => value.replace(/^~\//, `${root}/home/`),
 				paths,
+				companionPackageLines: ["Companion packages", "- pi-intercom: inactive"],
 				deps: {
 					isAsyncAvailable: () => true,
 					gitInfo: () => "live-context-demo@abc123 clean",
@@ -121,11 +122,13 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /- configured session dir: .*subagent-sessions/);
 			assert.match(report, /- current session file: .*parent\.jsonl/);
 			assert.match(report, /- temp root: ok /);
-			assert.match(report, /- agents: total 4 \(builtin 1, user 1, project 2\)/);
-			assert.match(report, /- chains: total 2 \(builtin 0, user 1, project 1\)/);
+			assert.match(report, /- agents: total 4 \(builtin 1, package 0, user 1, project 2\)/);
+			assert.match(report, /- chains: total 2 \(builtin 0, package 0, user 1, project 1\)/);
 			assert.match(report, /- skills: total 2 \(project 1, user-package 1\)/);
 			assert.match(report, /- bridge: inactive \(pi-intercom extension was not found\)/);
 			assert.match(report, /- pi-intercom: unavailable /);
+			assert.match(report, /Companion packages/);
+			assert.match(report, /- pi-intercom: inactive/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

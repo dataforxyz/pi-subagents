@@ -305,6 +305,7 @@ function resolveChainPath(filePath: string, chainDir: string): string {
  * These are appended to the task to tell the agent what to read/write.
  */
 export function writeInitialProgressFile(progressDir: string): void {
+	fs.mkdirSync(progressDir, { recursive: true });
 	fs.writeFileSync(path.join(progressDir, "progress.md"), INITIAL_PROGRESS_CONTENT);
 }
 

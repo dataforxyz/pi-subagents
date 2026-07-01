@@ -173,9 +173,8 @@ export function formatControlNoticeMessage(event: ControlEvent, childIntercomTar
 		].filter((line): line is string => Boolean(line)).join("\n");
 	}
 
-	const nudgeCommand = childIntercomTarget
-		? `intercom({ action: "send", to: "${childIntercomTarget}", message: "What are you blocked on? Reply with the smallest next step or ask for a decision." })`
-		: undefined;
+	const nudgeMessage = "What are you blocked on? Reply with the smallest next step or ask for a decision.";
+	const nudgeCommand = `subagent({ action: "resume", id: "${runTarget}", ${event.index !== undefined ? `index: ${event.index}, ` : ""}message: "${nudgeMessage}" })`;
 	if (event.type === "active_long_running") {
 		const facts = formatLongRunningFacts(event);
 		return [
@@ -183,10 +182,9 @@ export function formatControlNoticeMessage(event: ControlEvent, childIntercomTar
 			`Run: ${runTarget}${event.index !== undefined ? ` step ${event.index + 1}` : ""}`,
 			`Signal: ${event.message}`,
 			facts ? `Facts: ${facts}` : undefined,
-			"Hint: Inspect status, then nudge if the work seems stuck.",
-			childIntercomTarget
-				? `Nudge: ${nudgeCommand}`
-				: "Nudge: no child message route registered",
+			"Hint: Inspect status, then nudge if the work seems stuck. Live async nudges interrupt the child before sending the follow-up.",
+			`Nudge: ${nudgeCommand}`,
+			childIntercomTarget ? `Direct intercom target: ${childIntercomTarget}` : undefined,
 			`Status: subagent({ action: "status", id: "${runTarget}" })`,
 			`Interrupt: subagent({ action: "interrupt", id: "${runTarget}" })`,
 		].filter((line): line is string => Boolean(line)).join("\n");
@@ -197,10 +195,9 @@ export function formatControlNoticeMessage(event: ControlEvent, childIntercomTar
 		`Run: ${runTarget}${event.index !== undefined ? ` step ${event.index + 1}` : ""}`,
 		`Signal: ${event.message}`,
 		event.recentFailureSummary ? `Recent failures: ${event.recentFailureSummary}` : undefined,
-		"Hint: Inspect status first unless the run is clearly blocked.",
-		childIntercomTarget
-			? `Nudge: ${nudgeCommand}`
-			: "Nudge: no child message route registered",
+		"Hint: Inspect status first unless the run is clearly blocked. Live async nudges interrupt the child before sending the follow-up.",
+		`Nudge: ${nudgeCommand}`,
+		childIntercomTarget ? `Direct intercom target: ${childIntercomTarget}` : undefined,
 		`Status: subagent({ action: "status", id: "${runTarget}" })`,
 		`Interrupt: subagent({ action: "interrupt", id: "${runTarget}" })`,
 	].filter((line): line is string => Boolean(line)).join("\n");

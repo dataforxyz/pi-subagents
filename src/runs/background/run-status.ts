@@ -205,6 +205,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				statusActivityText ? `Activity: ${statusActivityText}` : undefined,
 				`Mode: ${status.mode}`,
 				`Progress: ${progressLabel}`,
+				status.pendingAppends ? `Pending appends: ${status.pendingAppends}` : undefined,
 				`Started: ${started}`,
 				`Updated: ${updated}`,
 				`Dir: ${asyncDir}`,

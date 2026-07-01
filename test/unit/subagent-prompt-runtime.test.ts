@@ -43,6 +43,8 @@ const PROMPT_WITH_EXPLICIT_SKILL = [
 	"\nCurrent date: 2026-04-16",
 ].join("");
 
+const CONFIGURED_SKILLS_SECTION = "\n\nThe following configured skills are available to this subagent.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>configured-skill</name>\n    <description>explicit agent skill</description>\n    <location>/tmp/configured-skill/SKILL.md</location>\n  </skill>\n</available_skills>";
+
 afterEach(() => {
 	if (envSnapshot.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT === undefined) delete process.env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT;
 	else process.env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT = envSnapshot.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT;
@@ -117,7 +119,8 @@ describe("subagent prompt runtime", () => {
 
 		assert.ok(rewritten.startsWith(CHILD_SUBAGENT_BOUNDARY_INSTRUCTIONS));
 		assert.ok(rewritten.includes("Do not propose or run subagents."));
-		assert.ok(rewritten.includes("If you need to edit files, call the actual edit/write tools."));
+		assert.ok(rewritten.includes("If you need to edit files, use the available editing tools."));
+		assert.ok(!rewritten.includes("call the actual edit/write tools"));
 		assert.ok(rewritten.includes("Do not print tool-call syntax, patches, or pseudo-tool calls as text."));
 		assert.equal(rewriteSubagentPrompt(rewritten, { inheritProjectContext: true, inheritSkills: true }).indexOf(CHILD_SUBAGENT_BOUNDARY_INSTRUCTIONS), 0);
 		assert.equal(rewriteSubagentPrompt(rewritten, { inheritProjectContext: true, inheritSkills: true }).lastIndexOf(CHILD_SUBAGENT_BOUNDARY_INSTRUCTIONS), 0);
@@ -133,6 +136,8 @@ describe("subagent prompt runtime", () => {
 
 		assert.ok(rewritten.startsWith(CHILD_FANOUT_BOUNDARY_INSTRUCTIONS));
 		assert.ok(rewritten.includes("You may use the `subagent` tool only for the fanout work explicitly requested in this task."));
+		assert.ok(rewritten.includes("If you need to edit files, use the available editing tools."));
+		assert.ok(!rewritten.includes("call the actual edit/write tools"));
 		assert.ok(!rewritten.includes("Do not propose or run subagents."));
 		assert.equal(rewritten.lastIndexOf(CHILD_FANOUT_BOUNDARY_INSTRUCTIONS), 0);
 	});
@@ -159,6 +164,25 @@ describe("subagent prompt runtime", () => {
 		assert.ok(!rewritten.includes("# Project Context"));
 	});
 
+	it("keeps configured lazy skill references when inherited skills are stripped", () => {
+		const prompt = [
+			"You are a subagent.",
+			CONFIGURED_SKILLS_SECTION,
+			"\n\n# Project Context\n\nProject-specific instructions and guidelines:\n\n## /repo/AGENTS.md\n\nProject rules\n\n",
+			SKILLS_SECTION,
+			"\nCurrent date: 2026-04-16",
+		].join("");
+		const rewritten = rewriteSubagentPrompt(prompt, {
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.ok(rewritten.includes("<name>configured-skill</name>"));
+		assert.ok(rewritten.includes("/tmp/configured-skill/SKILL.md"));
+		assert.ok(!rewritten.includes("<name>safe-bash</name>"));
+		assert.ok(!rewritten.includes("# Project Context"));
+	});
+
 	it("strips the subagent orchestration skill even when inherited skills remain", () => {
 		const rewritten = rewriteSubagentPrompt(BASE_PROMPT, {
 			inheritProjectContext: true,
@@ -182,11 +206,12 @@ describe("subagent prompt runtime", () => {
 		const user = { role: "user", content: "Task" };
 		const instruction = { role: "custom", customType: "subagent-orchestration-instructions", content: "Subagent orchestration is enabled." };
 		const slashResult = { role: "custom", customType: "subagent-slash-result", content: "## Orchestration" };
+		const slashTextResult = { role: "custom", customType: "subagent-slash-text-result", content: "Subagent profiles" };
 		const notify = { role: "custom", customType: "subagent-notify", content: "Background task completed" };
 		const control = { role: "custom", customType: "subagent_control_notice", content: "needs attention" };
 		const otherCustom = { role: "custom", customType: "other", content: "keep" };
 
-		assert.deepEqual(stripParentOnlySubagentMessages([user, instruction, slashResult, notify, control, otherCustom]), [user, otherCustom]);
+		assert.deepEqual(stripParentOnlySubagentMessages([user, instruction, slashResult, slashTextResult, notify, control, otherCustom]), [user, otherCustom]);
 	});
 
 	it("compacts routine handler receipts for child context while preserving lookup pointers", () => {
@@ -349,6 +374,16 @@ describe("subagent prompt runtime", () => {
 				},
 			],
 		);
+	});
+
+	it("preserves live nested subagent calls and results in fanout child context", () => {
+		const user = { role: "user", content: "Task" };
+		const subagentResult = { role: "toolResult", toolName: "subagent", content: "OK" };
+		const subagentCall = { role: "assistant", content: [{ type: "toolCall", name: "subagent", input: { agent: "delegate" } }] };
+		const instruction = { role: "custom", customType: "subagent-orchestration-instructions", content: "Subagent orchestration is enabled." };
+		process.env[SUBAGENT_FANOUT_CHILD_ENV] = "1";
+
+		assert.deepEqual(stripParentOnlySubagentMessages([user, subagentCall, subagentResult, instruction]), [user, subagentCall, subagentResult]);
 	});
 
 	it("sets the child intercom session name from env during agent startup", async () => {

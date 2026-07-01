@@ -29,7 +29,7 @@ Search strategy:
 - practical experience or benchmark query
 - recent developments query when the topic is time-sensitive
 
-Output format (`research.md`):
+Output format:
 
 # Research: [topic]
 

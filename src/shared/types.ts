@@ -148,6 +148,8 @@ export interface ControlEvent {
 
 export type SubagentResultStatus = "completed" | "failed" | "paused" | "detached";
 export type SubagentRunMode = "single" | "parallel" | "chain";
+export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 1;
+export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFACT_VERSION;
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
@@ -156,9 +158,15 @@ export type PublicNestedStepSummary = Pick<
 	children?: PublicNestedRunSummary[];
 };
 
+export type CostSummary = {
+	inputTokens: number;
+	outputTokens: number;
+	costUsd: number;
+};
+
 export type PublicNestedRunSummary = Pick<
 	NestedRunSummary,
-	"id" | "parentRunId" | "parentStepIndex" | "parentAgent" | "depth" | "path" | "asyncDir" | "sessionId" | "sessionFile" | "intercomTarget" | "ownerIntercomTarget" | "leafIntercomTarget" | "ownerState" | "mode" | "state" | "agent" | "agents" | "currentStep" | "chainStepCount" | "parallelGroups" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "totalTokens" | "startedAt" | "endedAt" | "lastUpdate" | "error"
+	"id" | "parentRunId" | "parentStepIndex" | "parentAgent" | "depth" | "path" | "asyncDir" | "sessionId" | "sessionFile" | "intercomTarget" | "ownerIntercomTarget" | "leafIntercomTarget" | "ownerState" | "mode" | "state" | "agent" | "agents" | "currentStep" | "chainStepCount" | "parallelGroups" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "totalTokens" | "totalCost" | "startedAt" | "endedAt" | "lastUpdate" | "error"
 > & {
 	steps?: PublicNestedStepSummary[];
 	children?: PublicNestedRunSummary[];
@@ -395,6 +403,7 @@ export interface SingleResult {
 	detached?: boolean;
 	detachedReason?: string;
 	interrupted?: boolean;
+	timedOut?: boolean;
 	messages?: Message[];
 	usage: Usage;
 	model?: string;
@@ -419,6 +428,7 @@ export interface SingleResult {
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: AcceptanceLedger;
+	children?: NestedRunSummary[];
 }
 
 export interface Details {
@@ -447,6 +457,10 @@ export interface Details {
 	currentStepIndex?: number;   // 0-indexed current step (for running chains)
 	workflowGraph?: WorkflowGraphSnapshot;
 	outputs?: ChainOutputMap;
+	// Aggregated child usage across all agents in the run
+	totalChildUsage?: Usage;
+	// Aggregated cost across all agents in the run
+	totalCost?: CostSummary;
 }
 
 // ============================================================================
@@ -536,6 +550,7 @@ export interface NestedRunSummary extends NestedRunAddress {
 	turnCount?: number;
 	toolCount?: number;
 	totalTokens?: TokenUsage;
+	totalCost?: CostSummary;
 	startedAt?: number;
 	endedAt?: number;
 	lastUpdate?: number;
@@ -550,6 +565,7 @@ export interface NestedRouteInfo {
 }
 
 export interface AsyncStartedEvent {
+	lifecycleArtifactVersion?: SubagentLifecycleArtifactVersion;
 	id?: string;
 	asyncDir?: string;
 	pid?: number;
@@ -582,6 +598,7 @@ export interface SubagentLowWatermarkEvent {
 }
 
 export interface AsyncStatus {
+	lifecycleArtifactVersion?: SubagentLifecycleArtifactVersion;
 	runId: string;
 	sessionId?: string;
 	mode: SubagentRunMode;
@@ -600,6 +617,7 @@ export interface AsyncStatus {
 	cwd?: string;
 	currentStep?: number;
 	chainStepCount?: number;
+	pendingAppends?: number;
 	parallelGroups?: AsyncParallelGroupStatus[];
 	workflowGraph?: WorkflowGraphSnapshot;
 	steps?: Array<{
@@ -631,6 +649,7 @@ export interface AsyncStatus {
 		thinking?: string;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
+		totalCost?: CostSummary;
 		error?: string;
 		structuredOutput?: unknown;
 		structuredOutputPath?: string;
@@ -640,6 +659,7 @@ export interface AsyncStatus {
 	sessionDir?: string;
 	outputFile?: string;
 	totalTokens?: TokenUsage;
+	totalCost?: CostSummary;
 	sessionFile?: string;
 	outputs?: ChainOutputMap;
 }
@@ -703,6 +723,8 @@ export interface ForegroundResumeRun {
 export interface SubagentState {
 	baseCwd: string;
 	currentSessionId: string | null;
+	subagentInProgress?: boolean;
+	subagentSpawns?: { sessionId: string | null; count: number };
 	asyncJobs: Map<string, AsyncJobState>;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
 	foregroundControls: Map<string, {
@@ -732,6 +754,8 @@ export interface SubagentState {
 	completionSeen: Map<string, number>;
 	watcher: FSWatcher | null;
 	watcherRestartTimer: ReturnType<typeof setTimeout> | null;
+	companionSuggestionStartupShown?: boolean;
+	companionSuggestionListShown?: boolean;
 	resultFileCoalescer: {
 		schedule(file: string, delayMs?: number): boolean;
 		clear(): void;
@@ -778,9 +802,13 @@ export const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom
 // ============================================================================
 
 export interface RunSyncOptions {
+	/** Session id of the direct parent session for permission-system ask forwarding. */
+	parentSessionId?: string;
 	cwd?: string;
 	signal?: AbortSignal;
 	interruptSignal?: AbortSignal;
+	timeoutMs?: number;
+	deadlineAt?: number;
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
 	onUpdate?: (r: import("@earendil-works/pi-agent-core").AgentToolResult<Details>) => void;
@@ -802,11 +830,13 @@ export interface RunSyncOptions {
 	nestedRoute?: NestedRouteInfo;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;
+	/** Override the agent's default thinking level for this run */
+	thinkingOverride?: AgentConfig["thinking"];
 	/** Registry models available for heuristic bare-model resolution */
 	availableModels?: Array<{ provider: string; id: string; fullId: string }>;
 	/** Current parent-session provider to prefer for ambiguous bare model ids */
 	preferredModelProvider?: string;
-	/** Skills to inject (overrides agent default if provided) */
+	/** Skills to make available (overrides agent default if provided) */
 	skills?: string[];
 	structuredOutput?: {
 		schema: JsonSchemaObject;
@@ -852,18 +882,49 @@ interface ExtensionChainConfig {
 	};
 }
 
+export interface ProactiveSkillSubagentsConfig {
+	enabled?: boolean;
+	minReferences?: number;
+	maxRecommendations?: number;
+	preferredAgent?: string;
+}
+
+export type CompanionSuggestionPackage = "pi-prompt-template-model" | "pi-intercom";
+export type CompanionSuggestionSurface = "session_start" | "list" | "doctor";
+
+export interface CompanionSuggestionPackageConfig {
+	enabled?: boolean;
+	surfaces?: CompanionSuggestionSurface[];
+	dismissed?: {
+		user?: boolean;
+		workspaces?: string[];
+	};
+}
+
+export interface CompanionSuggestionsConfig {
+	enabled?: boolean;
+	packages?: Partial<Record<CompanionSuggestionPackage, CompanionSuggestionPackageConfig>>;
+}
+
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
 	forceTopLevelAsync?: boolean;
 	defaultSessionDir?: string;
+	singleRunOutputBaseDir?: string;
 	maxSubagentDepth?: number;
+	maxSubagentSpawnsPerSession?: number;
+	/** Global cap on simultaneously-running subagent tasks within a single run. Defaults to 20. */
+	globalConcurrencyLimit?: number;
 	control?: ControlConfig;
 	parallel?: TopLevelParallelConfig;
 	chain?: ExtensionChainConfig;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
+	worktreeBaseDir?: string;
 	intercomBridge?: IntercomBridgeConfig;
 	backgroundForkHandlers?: BackgroundForkHandlersConfig;
+	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
+	companionSuggestions?: CompanionSuggestionsConfig | false;
 }
 
 // ============================================================================
@@ -966,6 +1027,7 @@ export const CHAIN_RUNS_DIR = path.join(TEMP_ROOT_DIR, "chain-runs");
 export const TEMP_ARTIFACTS_DIR = path.join(TEMP_ROOT_DIR, "artifacts");
 export const WIDGET_KEY = "subagent-async";
 export const SLASH_RESULT_TYPE = "subagent-slash-result";
+export const SLASH_TEXT_RESULT_TYPE = "subagent-slash-text-result";
 export const SLASH_SUBAGENT_REQUEST_EVENT = "subagent:slash:request";
 export const SLASH_SUBAGENT_STARTED_EVENT = "subagent:slash:started";
 export const SLASH_SUBAGENT_RESPONSE_EVENT = "subagent:slash:response";
@@ -974,7 +1036,8 @@ export const SLASH_SUBAGENT_CANCEL_EVENT = "subagent:slash:cancel";
 export const POLL_INTERVAL_MS = 250;
 export const MAX_WIDGET_JOBS = 4;
 export const DEFAULT_SUBAGENT_MAX_DEPTH = 2;
-export const SUBAGENT_ACTIONS = ["list", "get", "create", "update", "delete", "status", "interrupt", "resume", "doctor"] as const;
+export const DEFAULT_MAX_SUBAGENT_SPAWNS_PER_SESSION = 40;
+export const SUBAGENT_ACTIONS = ["list", "get", "models", "create", "update", "delete", "status", "interrupt", "resume", "append-step", "doctor"] as const;
 
 export const DEFAULT_FORK_PREAMBLE =
 	"You are a delegated subagent running from a fork of the parent session. " +
@@ -1017,10 +1080,14 @@ export function wrapForkTask(task: string, preamble?: string | false): string {
 // Recursion Depth Guard
 // ============================================================================
 
-export function normalizeMaxSubagentDepth(value: unknown): number | undefined {
+function normalizeNonNegativeInteger(value: unknown): number | undefined {
 	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
 	if (!Number.isInteger(parsed) || parsed < 0) return undefined;
 	return parsed;
+}
+
+export function normalizeMaxSubagentDepth(value: unknown): number | undefined {
+	return normalizeNonNegativeInteger(value);
 }
 
 export function resolveCurrentMaxSubagentDepth(configMaxDepth?: number): number {
@@ -1049,6 +1116,16 @@ export function getSubagentDepthEnv(maxDepth?: number): Record<string, string> {
 		PI_SUBAGENT_DEPTH: String(nextDepth),
 		PI_SUBAGENT_MAX_DEPTH: String(normalizeMaxSubagentDepth(maxDepth) ?? resolveCurrentMaxSubagentDepth()),
 	};
+}
+
+export function normalizeMaxSubagentSpawnsPerSession(value: unknown): number | undefined {
+	return normalizeNonNegativeInteger(value);
+}
+
+export function resolveMaxSubagentSpawnsPerSession(configMaxSpawns?: number): number {
+	return normalizeMaxSubagentSpawnsPerSession(process.env.PI_SUBAGENT_MAX_SPAWNS_PER_SESSION)
+		?? normalizeMaxSubagentSpawnsPerSession(configMaxSpawns)
+		?? DEFAULT_MAX_SUBAGENT_SPAWNS_PER_SESSION;
 }
 
 // ============================================================================

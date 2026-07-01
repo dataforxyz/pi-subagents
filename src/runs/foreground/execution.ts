@@ -23,6 +23,8 @@ import {
 	DEFAULT_MAX_OUTPUT,
 	INTERCOM_DETACH_REQUEST_EVENT,
 	INTERCOM_DETACH_RESPONSE_EVENT,
+	type AcceptanceLedger,
+	type ResolvedAcceptanceConfig,
 	truncateOutput,
 	getSubagentDepthEnv,
 } from "../../shared/types.ts";
@@ -47,7 +49,7 @@ import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
-import { captureSingleOutputSnapshot, formatSavedOutputReference, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { captureSingleOutputSnapshot, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
 	buildModelCandidates,
 	formatModelAttemptNote,
@@ -80,6 +82,34 @@ function sumUsage(target: Usage, source: Usage): void {
 	target.cacheWrite += source.cacheWrite;
 	target.cost += source.cost;
 	target.turns += source.turns;
+}
+
+function formatTimeoutMessage(timeoutMs: number): string {
+	return `Subagent timed out after ${timeoutMs}ms.`;
+}
+
+function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; remainingMs: number; message: string } | undefined {
+	if (options.timeoutMs === undefined) return undefined;
+	const deadlineAt = options.deadlineAt ?? Date.now() + options.timeoutMs;
+	return {
+		timeoutMs: options.timeoutMs,
+		remainingMs: Math.max(0, deadlineAt - Date.now()),
+		message: formatTimeoutMessage(options.timeoutMs),
+	};
+}
+
+function buildTimedOutAcceptanceLedger(acceptance: ResolvedAcceptanceConfig): AcceptanceLedger {
+	return {
+		status: acceptance.level === "none" ? "not-required" : "rejected",
+		explicit: acceptance.explicit,
+		effectiveAcceptance: acceptance,
+		inferredReason: acceptance.inferredReason,
+		criteria: acceptance.criteria,
+		runtimeChecks: acceptance.level === "none"
+			? []
+			: [{ id: "timeout", status: "failed", message: "Acceptance was not evaluated because the subagent timed out." }],
+		verifyRuns: [],
+	};
 }
 
 function appendRecentOutput(progress: AgentProgress, lines: string[]): void {
@@ -150,20 +180,23 @@ async function runSingleAttempt(
 		originalTask?: string;
 	},
 ): Promise<SingleResult> {
-	const modelArg = applyThinkingSuffix(model, agent.thinking);
-		const { args, env: sharedEnv, tempDir } = buildPiArgs({
+	const effectiveThinking = options.thinkingOverride ?? agent.thinking;
+	const modelArg = applyThinkingSuffix(model, effectiveThinking, options.thinkingOverride !== undefined);
+	const { args, env: sharedEnv, tempDir } = buildPiArgs({
 		baseArgs: ["--mode", "json", "-p"],
 		task,
 		sessionEnabled: shared.sessionEnabled,
 		sessionDir: options.sessionDir,
 		sessionFile: options.sessionFile,
-		model,
-		thinking: agent.thinking,
+		model: modelArg,
+		thinking: effectiveThinking,
 		systemPromptMode: agent.systemPromptMode,
 		inheritProjectContext: agent.inheritProjectContext,
 		inheritSkills: agent.inheritSkills,
+		requireReadTool: Boolean(shared.resolvedSkillNames?.length),
 		tools: agent.tools,
 		extensions: agent.extensions,
+		subagentOnlyExtensions: agent.subagentOnlyExtensions,
 		systemPrompt: shared.systemPrompt,
 		mcpDirectTools: agent.mcpDirectTools,
 		cwd: options.cwd ?? runtimeCwd,
@@ -177,6 +210,7 @@ async function runSingleAttempt(
 		parentControlInbox: options.nestedRoute?.controlInbox,
 			parentRootRunId: options.nestedRoute?.rootRunId,
 			parentCapabilityToken: options.nestedRoute?.capabilityToken,
+			parentSessionId: options.parentSessionId,
 			structuredOutput: options.structuredOutput,
 		});
 
@@ -226,6 +260,21 @@ async function runSingleAttempt(
 		lastActivityAt: startTime,
 	};
 	result.progress = progress;
+	const attemptTimeout = resolveAttemptTimeout(options);
+	if (attemptTimeout?.remainingMs === 0) {
+		result.exitCode = 1;
+		result.timedOut = true;
+		result.error = attemptTimeout.message;
+		result.finalOutput = attemptTimeout.message;
+		progress.status = "failed";
+		progress.error = attemptTimeout.message;
+		result.progressSummary = {
+			toolCount: progress.toolCount,
+			tokens: progress.tokens,
+			durationMs: progress.durationMs,
+		};
+		return result;
+	}
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
 
@@ -247,6 +296,23 @@ async function runSingleAttempt(
 		let removeAbortListener: (() => void) | undefined;
 		let removeInterruptListener: (() => void) | undefined;
 		let activityTimer: NodeJS.Timeout | undefined;
+		let timeoutTimer: NodeJS.Timeout | undefined;
+		let timeoutTerminationTimer: NodeJS.Timeout | undefined;
+		let timeoutHardKillTimer: NodeJS.Timeout | undefined;
+		const clearTimeoutTimers = () => {
+			if (timeoutTimer) {
+				clearTimeout(timeoutTimer);
+				timeoutTimer = undefined;
+			}
+			if (timeoutTerminationTimer) {
+				clearTimeout(timeoutTerminationTimer);
+				timeoutTerminationTimer = undefined;
+			}
+			if (timeoutHardKillTimer) {
+				clearTimeout(timeoutHardKillTimer);
+				timeoutHardKillTimer = undefined;
+			}
+		};
 
 		const detachForIntercom = () => {
 			detached = true;
@@ -315,6 +381,7 @@ async function runSingleAttempt(
 			settled = true;
 			clearFinalDrainTimers();
 			clearStdioGuard();
+			clearTimeoutTimers();
 			if (activityTimer) {
 				clearInterval(activityTimer);
 				activityTimer = undefined;
@@ -428,7 +495,8 @@ async function runSingleAttempt(
 		const fireUpdate = () => {
 			if (!options.onUpdate || processClosed) return;
 			progress.durationMs = Date.now() - startTime;
-			emitUpdateSnapshot(getFinalOutput(result.messages) || "(running...)");
+			const output = result.timedOut && result.finalOutput ? result.finalOutput : getFinalOutput(result.messages);
+			emitUpdateSnapshot(output || "(running...)");
 		};
 
 		const processLine = (line: string) => {
@@ -451,8 +519,11 @@ async function runSingleAttempt(
 				const toolArgs = evt.args && typeof evt.args === "object" && !Array.isArray(evt.args)
 					? evt.args as Record<string, unknown>
 					: {};
+				let shouldDetachForBlockingIntercom = false;
 				if (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {
 					intercomStarted = true;
+					shouldDetachForBlockingIntercom = (evt.toolName === "intercom" && toolArgs.action === "ask")
+						|| (evt.toolName === "contact_supervisor" && (toolArgs.reason === "need_decision" || toolArgs.reason === "interview_request"));
 				}
 				progress.toolCount++;
 				progress.currentTool = evt.toolName;
@@ -463,6 +534,9 @@ async function runSingleAttempt(
 				observedMutationAttempt = observedMutationAttempt || mutates;
 				pendingToolResult = { tool: evt.toolName ?? "tool", path: progress.currentPath, mutates, startedAt: now };
 				fireUpdate();
+				if (shouldDetachForBlockingIntercom && !detached && !processClosed) {
+					detachForIntercom();
+				}
 			}
 
 			if (evt.type === "tool_execution_end") {
@@ -554,6 +628,31 @@ async function runSingleAttempt(
 			activityTimer.unref?.();
 		}
 
+		if (attemptTimeout) {
+			timeoutTimer = setTimeout(() => {
+				if (processClosed || settled || detached || interruptedByControl) return;
+				result.timedOut = true;
+				result.error = attemptTimeout.message;
+				result.finalOutput = attemptTimeout.message;
+				progress.status = "failed";
+				progress.error = attemptTimeout.message;
+				progress.durationMs = Date.now() - startTime;
+				fireUpdate();
+				trySignalChild(proc, "SIGINT");
+				timeoutTerminationTimer = setTimeout(() => {
+					if (processClosed || settled || detached) return;
+					trySignalChild(proc, "SIGTERM");
+				}, 1000);
+				timeoutTerminationTimer.unref?.();
+				timeoutHardKillTimer = setTimeout(() => {
+					if (processClosed || settled || detached) return;
+					trySignalChild(proc, "SIGKILL");
+				}, 4000);
+				timeoutHardKillTimer.unref?.();
+			}, attemptTimeout.remainingMs);
+			timeoutTimer.unref?.();
+		}
+
 		let stderrBuf = "";
 
 		const clearStdioGuard = attachPostExitStdioGuard(proc, { idleMs: 2000, hardMs: 8000 });
@@ -624,7 +723,9 @@ async function runSingleAttempt(
 		if (options.interruptSignal) {
 			const interrupt = () => {
 				if (processClosed || detached || settled) return;
+				if (result.timedOut) return;
 				interruptedByControl = true;
+				clearTimeoutTimers();
 				progress.status = "running";
 				progress.durationMs = Date.now() - startTime;
 				result.interrupted = true;
@@ -678,6 +779,16 @@ async function runSingleAttempt(
 				: `${errInfo.errorType} failed with exit code ${errInfo.exitCode}`;
 		}
 	}
+	if (result.exitCode === 0 && !result.error) {
+		const finalText = getFinalOutput(result.messages);
+		const missingStructuredOutput = options.structuredOutput
+			? !existsSync(options.structuredOutput.outputPath)
+			: false;
+		if (!finalText?.trim() && (!options.structuredOutput || missingStructuredOutput)) {
+			result.exitCode = 1;
+			result.error = "Subagent produced no output (possible model cold-start or empty response).";
+		}
+	}
 	if (options.structuredOutput && result.exitCode === 0 && !result.error) {
 		const structured = readStructuredOutput({
 			schema: options.structuredOutput.schema,
@@ -709,8 +820,14 @@ async function runSingleAttempt(
 		durationMs: progress.durationMs,
 	};
 
-		const acceptanceOutput = getFinalOutput(result.messages);
-		let fullOutput = stripAcceptanceReport(acceptanceOutput);
+	const acceptanceOutput = getFinalOutput(result.messages);
+	let fullOutput = stripAcceptanceReport(acceptanceOutput);
+	if (result.timedOut) {
+		const timeoutMessage = formatTimeoutMessage(options.timeoutMs ?? 0);
+		fullOutput = fullOutput.trim()
+			? `${timeoutMessage}\n\nPartial output before timeout:\n${fullOutput}`
+			: timeoutMessage;
+	}
 	const completionGuard = result.exitCode === 0 && !result.error && agent.completionGuard !== false
 		? evaluateCompletionMutationGuard({
 			agent: agent.name,
@@ -834,6 +951,7 @@ export async function runSync(
 		const skillInjection = buildSkillInjection(resolvedSkills);
 		systemPrompt = systemPrompt ? `${systemPrompt}\n\n${skillInjection}` : skillInjection;
 	}
+	systemPrompt = injectOutputPathSystemPrompt(systemPrompt, options.outputPath);
 
 	const candidates = buildModelCandidates(
 		options.modelOverride ?? agent.model,
@@ -865,7 +983,6 @@ export async function runSync(
 	const modelsToTry = candidates.length > 0 ? candidates : [undefined];
 	for (let i = 0; i < modelsToTry.length; i++) {
 		const candidate = modelsToTry[i];
-		if (candidate) attemptedModels.push(candidate);
 		const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
 		const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, options, {
 			sessionEnabled,
@@ -879,18 +996,23 @@ export async function runSync(
 			originalTask: task,
 		});
 		lastResult = result;
+		if (result.model) attemptedModels.push(result.model);
+		else if (candidate) attemptedModels.push(candidate);
 		sumUsage(aggregateUsage, result.usage);
 		totalToolCount += result.progressSummary?.toolCount ?? 0;
 		totalDurationMs += result.progressSummary?.durationMs ?? 0;
 		const attemptSucceeded = result.exitCode === 0 && !result.error;
 		const attempt: ModelAttempt = {
-			model: candidate ?? result.model ?? agent.model ?? "default",
+			model: result.model ?? candidate ?? agent.model ?? "default",
 			success: attemptSucceeded,
 			exitCode: result.exitCode,
 			error: result.error,
 			usage: { ...result.usage },
 		};
 		modelAttempts.push(attempt);
+		if (result.timedOut) {
+			break;
+		}
 		if (attemptSucceeded) {
 			break;
 		}
@@ -966,14 +1088,16 @@ export async function runSync(
 		if (sessionFile) result.sessionFile = sessionFile;
 	}
 
-		result.acceptance = await evaluateAcceptance({
+	result.acceptance = result.timedOut
+		? buildTimedOutAcceptanceLedger(effectiveAcceptance)
+		: await evaluateAcceptance({
 			acceptance: effectiveAcceptance,
 			output: acceptanceOutputByResult.get(result) ?? result.finalOutput ?? "",
 			cwd: options.cwd ?? runtimeCwd,
 		});
-		const acceptanceFailure = acceptanceFailureMessage(result.acceptance);
-		stripAcceptanceReportsFromMessages(result.messages);
-		if (acceptanceFailure && result.acceptance.explicit && result.exitCode === 0 && !result.detached && !result.interrupted) {
+	const acceptanceFailure = acceptanceFailureMessage(result.acceptance);
+	stripAcceptanceReportsFromMessages(result.messages);
+	if (acceptanceFailure && result.acceptance.explicit && result.exitCode === 0 && !result.detached && !result.interrupted && !result.timedOut) {
 		result.exitCode = 1;
 		result.error = result.error ? `${result.error}\n${acceptanceFailure}` : acceptanceFailure;
 		if (result.progress) {

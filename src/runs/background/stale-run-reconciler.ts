@@ -41,6 +41,31 @@ function getErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function readRunnerStartupDiagnostics(asyncDir: string): string | undefined {
+	const stderrPath = path.join(asyncDir, "runner.stderr.log");
+	const maxBytes = 64 * 1024;
+	let content: string;
+	try {
+		const stat = fs.statSync(stderrPath);
+		if (stat.size <= 0) return undefined;
+		const fd = fs.openSync(stderrPath, "r");
+		try {
+			const bytesToRead = Math.min(stat.size, maxBytes);
+			const start = Math.max(0, stat.size - bytesToRead);
+			const buffer = Buffer.alloc(bytesToRead);
+			fs.readSync(fd, buffer, 0, bytesToRead, start);
+			content = buffer.toString("utf-8").trim();
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return undefined;
+	}
+	if (!content) return undefined;
+	const lines = content.split(/\r?\n/).slice(-30).join("\n");
+	return lines.length > 4000 ? `${lines.slice(-4000)}\n[stderr tail truncated]` : lines;
+}
+
 function isNotFoundError(error: unknown): boolean {
 	return typeof error === "object"
 		&& error !== null
@@ -48,9 +73,14 @@ function isNotFoundError(error: unknown): boolean {
 		&& (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-function appendJsonl(filePath: string, payload: object): void {
-	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf-8");
+function appendJsonlBestEffort(filePath: string, payload: object): void {
+	try {
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf-8");
+	} catch {
+		// Repair status/result writes are the important path. A broken or full
+		// diagnostic event log must not make stale-run reconciliation fail.
+	}
 }
 
 function readStatusFile(asyncDir: string): AsyncStatus | null {
@@ -167,7 +197,9 @@ function buildStartedStatus(asyncDir: string, startedRun: StartedRunMetadata, no
 function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, reason?: string): { status: AsyncStatus; result: object; message: string } {
 	const runId = status.runId || path.basename(asyncDir);
 	const pid = typeof status.pid === "number" ? status.pid : "unknown";
-	const message = reason ?? `Async runner process ${pid} exited or disappeared before writing a result. Marked run failed by stale-run reconciliation.`;
+	const baseMessage = reason ?? `Async runner process ${pid} exited or disappeared before writing a result. Marked run failed by stale-run reconciliation.`;
+	const diagnostics = readRunnerStartupDiagnostics(asyncDir);
+	const message = diagnostics ? `${baseMessage}\n\nRunner stderr tail:\n${diagnostics}` : baseMessage;
 	const steps = status.steps?.length ? status.steps : [{ agent: "subagent", status: "running" as const }];
 	const repairedSteps = steps.map((step) => step.status === "running" || step.status === "pending"
 		? {
@@ -223,7 +255,7 @@ function writeFailedRepair(asyncDir: string, status: AsyncStatus, resultPath: st
 	const repair = buildFailedRepair(status, asyncDir, now, reason);
 	writeAtomicJson(resultPath, repair.result);
 	writeAtomicJson(path.join(asyncDir, "status.json"), repair.status);
-	appendJsonl(path.join(asyncDir, "events.jsonl"), {
+	appendJsonlBestEffort(path.join(asyncDir, "events.jsonl"), {
 		type: "subagent.run.repaired_stale",
 		ts: now,
 		runId: repair.status.runId,

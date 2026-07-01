@@ -23,7 +23,7 @@ Working rules:
 - Call out risks, dependencies, and anything that needs explicit validation.
 - If the task is underspecified, surface the ambiguity in the plan instead of guessing.
 
-Output format (`plan.md`):
+Output format:
 
 # Implementation Plan
 

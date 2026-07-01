@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
+	buildSkillInjection,
 	clearSkillCache,
 	discoverAvailableSkills,
 	resolveSkills,
@@ -17,14 +18,18 @@ const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
 const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 
-function makeProjectSkill(cwd: string, name: string, body: string): void {
-	const skillDir = path.join(cwd, ".pi", "skills", name);
+function writeSkillFile(skillDir: string, body: string, description = "Test description"): void {
 	fs.mkdirSync(skillDir, { recursive: true });
 	fs.writeFileSync(
 		path.join(skillDir, "SKILL.md"),
-		`---\ndescription: Test description\n---\n\n${body}\n`,
+		`---\ndescription: ${description}\n---\n\n${body}\n`,
 		"utf-8",
 	);
+}
+
+function makeProjectSkill(cwd: string, name: string, body: string, description = "Test description"): void {
+	const skillDir = path.join(cwd, ".pi", "skills", name);
+	writeSkillFile(skillDir, body, description);
 }
 
 function makeProjectPackageSkill(cwd: string, packageName: string, name: string, body: string): void {
@@ -82,6 +87,114 @@ describe("skills filesystem fallback", () => {
 		assert.equal(discovered?.description, "Test description");
 	});
 
+	it("discovers project skills nested below grouping directories", () => {
+		writeSkillFile(
+			path.join(tempDir, ".pi", "skills", "shell", "issue-262-nested-skill"),
+			"Use nested project skill.",
+			"Nested issue 262 skill",
+		);
+
+		const skills = discoverAvailableSkills(tempDir);
+		const discovered = skills.find((skill) => skill.name === "issue-262-nested-skill");
+		assert.ok(discovered, "expected grouped nested skill to be discovered");
+		assert.equal(discovered?.source, "project");
+		assert.equal(discovered?.description, "Nested issue 262 skill");
+
+		const { resolved, missing } = resolveSkills(["issue-262-nested-skill"], tempDir);
+		assert.deepEqual(missing, []);
+		assert.equal(resolved.length, 1);
+		assert.match(resolved[0]?.content ?? "", /Use nested project skill\./);
+	});
+
+	it("stops recursive project skill discovery at the first SKILL.md anchor", () => {
+		const groupedRoot = path.join(tempDir, ".pi", "skills", "group");
+		writeSkillFile(path.join(groupedRoot, "issue-262-anchor"), "Use anchor skill.");
+		writeSkillFile(path.join(groupedRoot, "issue-262-anchor", "nested", "issue-262-leaked-skill"), "Should not leak.");
+		writeSkillFile(path.join(groupedRoot, "issue-262-sibling"), "Use sibling skill.");
+
+		const names = discoverAvailableSkills(tempDir).map((skill) => skill.name);
+		assert.equal(names.includes("issue-262-anchor"), true);
+		assert.equal(names.includes("issue-262-sibling"), true);
+		assert.equal(names.includes("issue-262-leaked-skill"), false);
+	});
+
+	it("skips hidden directories and node_modules while recursing for project skills", () => {
+		const groupedRoot = path.join(tempDir, ".pi", "skills", "group");
+		writeSkillFile(path.join(groupedRoot, ".hidden", "issue-262-hidden-skill"), "Should stay hidden.");
+		writeSkillFile(path.join(groupedRoot, "node_modules", "issue-262-node-skill"), "Should stay ignored.");
+		writeSkillFile(path.join(groupedRoot, "visible", "issue-262-visible-skill"), "Use visible nested skill.");
+
+		const names = discoverAvailableSkills(tempDir).map((skill) => skill.name);
+		assert.equal(names.includes("issue-262-visible-skill"), true);
+		assert.equal(names.includes("issue-262-hidden-skill"), false);
+		assert.equal(names.includes("issue-262-node-skill"), false);
+	});
+
+	it("keeps direct markdown skills from explicit settings roots after parent recursion", () => {
+		const groupedRoot = path.join(tempDir, ".pi", "skills", "group");
+		fs.mkdirSync(groupedRoot, { recursive: true });
+		fs.writeFileSync(path.join(groupedRoot, "issue-262-direct.md"), "Use direct markdown skill.\n", "utf-8");
+		fs.writeFileSync(
+			path.join(tempDir, ".pi", "settings.json"),
+			JSON.stringify({ skills: ["./skills/group"] }, null, 2),
+			"utf-8",
+		);
+
+		const { resolved, missing } = resolveSkills(["issue-262-direct"], tempDir);
+		assert.deepEqual(missing, []);
+		assert.equal(resolved.length, 1);
+		assert.equal(resolved[0]?.source, "project-settings");
+		assert.match(resolved[0]?.content ?? "", /Use direct markdown skill\./);
+	});
+
+	it("keeps nested skills from higher-priority explicit settings roots after parent recursion", () => {
+		writeSkillFile(
+			path.join(tempDir, "skills", "group", "issue-262-settings-nested"),
+			"Use settings nested skill.",
+		);
+		fs.writeFileSync(
+			path.join(tempDir, "package.json"),
+			JSON.stringify({ name: "fixture", version: "1.0.0", pi: { skills: ["./skills"] } }, null, 2),
+			"utf-8",
+		);
+		fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".pi", "settings.json"),
+			JSON.stringify({ skills: ["../skills/group"] }, null, 2),
+			"utf-8",
+		);
+
+		const { resolved, missing } = resolveSkills(["issue-262-settings-nested"], tempDir);
+		assert.deepEqual(missing, []);
+		assert.equal(resolved.length, 1);
+		assert.equal(resolved[0]?.source, "project-settings");
+		assert.match(resolved[0]?.content ?? "", /Use settings nested skill\./);
+	});
+
+	it("keeps nested skills from higher-priority explicit settings roots when the root path is duplicated", () => {
+		writeSkillFile(
+			path.join(tempDir, "skills", "group", "issue-262-settings-same-root"),
+			"Use settings same root skill.",
+		);
+		fs.writeFileSync(
+			path.join(tempDir, "package.json"),
+			JSON.stringify({ name: "fixture", version: "1.0.0", pi: { skills: ["./skills"] } }, null, 2),
+			"utf-8",
+		);
+		fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".pi", "settings.json"),
+			JSON.stringify({ skills: ["../skills"] }, null, 2),
+			"utf-8",
+		);
+
+		const { resolved, missing } = resolveSkills(["issue-262-settings-same-root"], tempDir);
+		assert.deepEqual(missing, []);
+		assert.equal(resolved.length, 1);
+		assert.equal(resolved[0]?.source, "project-settings");
+		assert.match(resolved[0]?.content ?? "", /Use settings same root skill\./);
+	});
+
 	it("resolves and reads skill content via filesystem fallback", () => {
 		makeProjectSkill(tempDir, "resolve-skill", "Run local fallback checks.");
 
@@ -91,6 +204,33 @@ describe("skills filesystem fallback", () => {
 		assert.equal(resolved[0]?.name, "resolve-skill");
 		assert.equal(resolved[0]?.source, "project");
 		assert.match(resolved[0]?.content ?? "", /Run local fallback checks\./);
+	});
+
+	it("builds lazy skill references instead of inlining full skill bodies", () => {
+		makeProjectSkill(tempDir, "lazy-skill", "This body should stay out of the system prompt.");
+
+		const { resolved, missing } = resolveSkills(["lazy-skill"], tempDir);
+		assert.deepEqual(missing, []);
+
+		const injection = buildSkillInjection(resolved);
+		assert.match(injection, /The following configured skills are available to this subagent/);
+		assert.match(injection, /Use the read tool to load a skill's file/);
+		assert.match(injection, /<available_skills>/);
+		assert.match(injection, /<name>lazy-skill<\/name>/);
+		assert.match(injection, /<description>Test description<\/description>/);
+		assert.match(injection, /<location>.*lazy-skill.*SKILL\.md<\/location>/);
+		assert.doesNotMatch(injection, /This body should stay out/);
+		assert.doesNotMatch(injection, /<skill name=/);
+	});
+
+	it("escapes XML-sensitive skill metadata in lazy references", () => {
+		makeProjectSkill(tempDir, "amp&skill", "Body", "Use A & B <carefully>");
+
+		const { resolved } = resolveSkills(["amp&skill"], tempDir);
+		const injection = buildSkillInjection(resolved);
+		assert.match(injection, /<name>amp&amp;skill<\/name>/);
+		assert.match(injection, /<description>Use A &amp; B &lt;carefully&gt;<\/description>/);
+		assert.match(injection, /amp&amp;skill[\\/]SKILL\.md/);
 	});
 
 	it("does not expose pi-subagents as a child-injectable skill", () => {

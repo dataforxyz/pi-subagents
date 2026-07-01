@@ -20,6 +20,44 @@ export function splitThinkingSuffix(model: string): { baseModel: string; thinkin
 	};
 }
 
+/** Sentinel model value requesting that a subagent inherit the parent session's model. */
+export const INHERIT_MODEL = "inherit";
+
+/** Minimal shape of the parent session's in-memory model (`ctx.model`). */
+export interface ParentModel {
+	provider: string;
+	id: string;
+}
+
+/**
+ * Resolve the `--model` override passed to a spawned subagent.
+ *
+ * When no model is requested (`undefined`, `false`, empty, or the `"inherit"`
+ * sentinel), the child must inherit the parent session's *in-memory* model
+ * (`provider/id`) instead of being left to resolve its own model. Without an
+ * explicit `provider/id`, the child falls back to the global
+ * `~/.pi/agent/settings.json` default, which is shared across every open PI
+ * session — so a different session that last changed its model in the TUI would
+ * silently contaminate this session's subagents (see issue #266). Passing an
+ * explicit `provider/id` keeps each session's children isolated to that
+ * session's model.
+ *
+ * An explicitly requested model string is resolved via {@link resolveModelCandidate}.
+ */
+export function resolveSubagentModelOverride(
+	requestedModel: string | boolean | undefined,
+	parentModel: ParentModel | undefined,
+	availableModels: AvailableModelInfo[] | undefined,
+	preferredProvider?: string,
+): string | undefined {
+	const trimmed = typeof requestedModel === "string" ? requestedModel.trim() : "";
+	const explicit = trimmed && trimmed !== INHERIT_MODEL ? trimmed : undefined;
+	if (explicit === undefined) {
+		return parentModel ? `${parentModel.provider}/${parentModel.id}` : undefined;
+	}
+	return resolveModelCandidate(explicit, availableModels, preferredProvider);
+}
+
 export function resolveModelCandidate(
 	model: string | undefined,
 	availableModels: AvailableModelInfo[] | undefined,
@@ -88,6 +126,10 @@ const RETRYABLE_MODEL_FAILURE_PATTERNS = [
 	/\b502\b/,
 	/\b503\b/,
 	/\b504\b/,
+	/cold.?start/i,
+	/empty response/i,
+	/no output/i,
+	/model.*(?:load|fail|error)/i,
 ];
 
 export function isRetryableModelFailure(error: string | undefined): boolean {

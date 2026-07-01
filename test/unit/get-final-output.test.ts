@@ -45,6 +45,56 @@ describe("getFinalOutput", () => {
 		assert.equal(getFinalOutput(messages), "Earlier");
 	});
 
+	it("prefers an earlier explicit acceptance report over later summary-only text", () => {
+		const report = [
+			"Done",
+			"```acceptance-report",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "verified" }],
+				changedFiles: ["src/file.ts"],
+			}),
+			"```",
+		].join("\n");
+		const messages = [
+			assistantContent([{ type: "text", text: report }]),
+			assistantContent([{ type: "text", text: "Done." }]),
+		];
+
+		assert.equal(getFinalOutput(messages), report);
+	});
+
+	it("prefers an earlier json-fenced acceptance report over later summary-only text", () => {
+		const report = [
+			"Done",
+			"```json",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "verified" }],
+				validationOutput: ["tests passed"],
+			}),
+			"```",
+		].join("\n");
+		const messages = [
+			assistantContent([{ type: "text", text: report }]),
+			assistantContent([{ type: "text", text: "Done." }]),
+		];
+
+		assert.equal(getFinalOutput(messages), report);
+	});
+
+	it("does not prefer provider-error acceptance reports", () => {
+		const messages = [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "```acceptance-report\n{}\n```" }],
+				stopReason: "error",
+				errorMessage: "provider transport failed",
+			} as unknown as Message,
+			assistantContent([{ type: "text", text: "Done." }]),
+		];
+
+		assert.equal(getFinalOutput(messages), "Done.");
+	});
+
 	it("returns empty output when all assistant text is empty or whitespace-only", () => {
 		const messages = [
 			assistantContent([{ type: "text", text: "" }]),

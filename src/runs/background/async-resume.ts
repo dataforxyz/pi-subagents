@@ -1,8 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus } from "../../shared/types.ts";
+import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type SubagentState } from "../../shared/types.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
+import { deliverInterruptRequest } from "./control-channel.ts";
 import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
+
+export const ASYNC_RESUME_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
 export interface AsyncResumeParams {
 	id?: string;
@@ -18,6 +21,10 @@ export interface AsyncResumeDeps {
 	now?: () => number;
 }
 
+export interface AsyncResumeOptions {
+	requireSessionFile?: boolean;
+}
+
 export type AsyncResumeTarget = {
 	kind: "live" | "revive";
 	runId: string;
@@ -29,6 +36,44 @@ export type AsyncResumeTarget = {
 	cwd?: string;
 	sessionFile?: string;
 };
+
+type KillFn = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
+
+export function interruptLiveAsyncResumeTarget(input: {
+	target: AsyncResumeTarget & { kind: "live" };
+	state?: Pick<SubagentState, "asyncJobs">;
+	kill?: KillFn;
+	now?: () => number;
+	resultsDir?: string;
+}): { ok: true; asyncId: string } | { ok: false; message: string } {
+	const asyncId = input.target.runId;
+	if (!input.target.asyncDir) {
+		return { ok: false, message: `Async run ${asyncId} is live but does not have an async directory to interrupt.` };
+	}
+	const status = reconcileAsyncRun(input.target.asyncDir, { resultsDir: input.resultsDir, kill: input.kill, now: input.now }).status;
+	if (!status || status.state !== "running" || typeof status.pid !== "number") {
+		return { ok: false, message: `Async run ${asyncId} is live but no interrupt-capable runner pid was found.` };
+	}
+	try {
+		deliverInterruptRequest({
+			asyncDir: input.target.asyncDir,
+			pid: status.pid,
+			kill: input.kill,
+			signal: ASYNC_RESUME_INTERRUPT_SIGNAL,
+			now: input.now,
+			source: "async-resume",
+		});
+		const tracked = input.state?.asyncJobs.get(asyncId);
+		if (tracked) {
+			tracked.activityState = undefined;
+			tracked.updatedAt = input.now?.() ?? Date.now();
+		}
+		return { ok: true, asyncId };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { ok: false, message: `Failed to interrupt async run ${asyncId}: ${message}` };
+	}
+}
 
 interface AsyncResultFile {
 	id?: string;
@@ -236,9 +281,10 @@ function validateResumeSessionFile(runId: string, sessionFile: string): string {
 	return resolved;
 }
 
-export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncResumeDeps = {}): AsyncResumeTarget {
+export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncResumeDeps = {}, options: AsyncResumeOptions = {}): AsyncResumeTarget {
 	const asyncDirRoot = deps.asyncDirRoot ?? ASYNC_DIR;
 	const resultsDir = deps.resultsDir ?? RESULTS_DIR;
+	const requireSessionFile = options.requireSessionFile ?? true;
 	const location = resolveAsyncRunLocation(params, asyncDirRoot, resultsDir);
 	if (!location.asyncDir && !location.resultPath) {
 		throw new Error("Async run not found. Provide id or dir.");
@@ -313,8 +359,8 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const sessionFile = statusSteps[index]?.sessionFile
 		?? resultSteps[index]?.sessionFile
 		?? (stepCount === 1 ? status?.sessionFile ?? result?.sessionFile : undefined);
-	if (!sessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
-	const resolvedSessionFile = validateResumeSessionFile(runId, sessionFile);
+	if (!sessionFile && requireSessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
+	const resolvedSessionFile = sessionFile ? validateResumeSessionFile(runId, sessionFile) : undefined;
 
 	return {
 		kind: "revive",
@@ -325,7 +371,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		index,
 		intercomTarget: resolveSubagentIntercomTarget(runId, agent, index),
 		cwd: status?.cwd ?? result?.cwd,
-		sessionFile: resolvedSessionFile,
+		...(resolvedSessionFile ? { sessionFile: resolvedSessionFile } : {}),
 	};
 }
 

@@ -156,6 +156,49 @@ describe("result watcher", () => {
 		}
 	});
 
+	it("normalizes the native fs.watch path before watching result files", () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-"));
+		try {
+			const nativeResultsDir = path.join(path.dirname(resultsDir), `${path.basename(resultsDir)}-native`);
+			const pi = {
+				events: {
+					on: () => () => {},
+					emit() {},
+				},
+			};
+			const state = createState();
+			let watchedDir: fs.PathLike | undefined;
+			const fakeWatcher = {
+				on() {
+					return fakeWatcher;
+				},
+				close() {},
+				unref() {},
+			} as fs.FSWatcher;
+			const realpathSync = ((target: fs.PathLike, options?: unknown) => fs.realpathSync(target, options as BufferEncoding)) as typeof fs.realpathSync;
+			realpathSync.native = ((target: fs.PathLike) => target === resultsDir ? nativeResultsDir : fs.realpathSync.native(target)) as typeof fs.realpathSync.native;
+			const watcher = createResultWatcher(pi, state, resultsDir, 60_000, {
+				fs: {
+					...fs,
+					realpathSync,
+					watch(dir) {
+						watchedDir = dir;
+						return fakeWatcher;
+					},
+				},
+			});
+			try {
+				watcher.startResultWatcher();
+			} finally {
+				watcher.stopResultWatcher();
+			}
+
+			assert.equal(watchedDir, nativeResultsDir);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("falls back to polling when fs.watch throws EMFILE and preserves grouped intercom delivery", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-"));
 		try {

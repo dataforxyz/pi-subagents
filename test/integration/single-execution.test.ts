@@ -76,6 +76,7 @@ interface RunSyncResult {
 	artifactPaths?: ArtifactPaths;
 	finalOutput?: string;
 	interrupted?: boolean;
+	timedOut?: boolean;
 	detached?: boolean;
 	detachedReason?: string;
 	savedOutputPath?: string;
@@ -83,6 +84,16 @@ interface RunSyncResult {
 	outputReference?: { path: string; bytes: number; lines: number; message: string };
 	outputSaveError?: string;
 	sessionFile?: string;
+	acceptance?: {
+		status?: string;
+		verifyRuns?: Array<{ status?: string }>;
+		runtimeChecks?: Array<{ id?: string; status?: string; message?: string }>;
+	};
+}
+
+interface MockPiCallRecord {
+	args?: string[];
+	systemPrompts?: Array<{ mode?: string; path?: string; text?: string; error?: string }>;
 }
 
 interface ExecutionModule {
@@ -99,9 +110,17 @@ interface UtilsModule {
 	getFinalOutput(messages: unknown[]): string;
 }
 
+interface ExecutorToolResult {
+	content: Array<{ text?: string }>;
+	isError?: boolean;
+	details?: {
+		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
+	};
+}
+
 interface ExecutorModule {
 	createSubagentExecutor?: (...args: unknown[]) => {
-		execute: (...args: unknown[]) => Promise<{ content: Array<{ text?: string }>; isError?: boolean }>;
+		execute: (...args: unknown[]) => Promise<ExecutorToolResult>;
 	};
 }
 
@@ -113,6 +132,10 @@ const available = !!(execution && utils);
 const runSync = execution?.runSync;
 const getFinalOutput = utils?.getFinalOutput;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function writePackageSkill(packageRoot: string, skillName: string): void {
 	const skillDir = path.join(packageRoot, "skills", skillName);
@@ -151,22 +174,26 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		removeTempDir(tempDir);
 	});
 
-	function readCallArgs(): string[] {
+	function readCall(): { args: string[]; systemPrompts: NonNullable<MockPiCallRecord["systemPrompts"]> } {
 		const callFile = fs.readdirSync(mockPi.dir)
 			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
 			.sort()
 			.at(-1);
 		assert.ok(callFile, "expected a recorded mock pi call");
-		const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as { args?: string[] };
+		const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as MockPiCallRecord;
 		assert.ok(Array.isArray(payload.args), "expected recorded args");
-		return payload.args;
+		return { args: payload.args, systemPrompts: payload.systemPrompts ?? [] };
 	}
 
-	function makeExecutor(agents = [makeAgent("echo")]) {
+	function readCallArgs(): string[] {
+		return readCall().args;
+	}
+
+	function makeExecutor(agents = [makeAgent("echo")], config: Record<string, unknown> = {}) {
 		return createSubagentExecutor!({
 			pi: { events: createEventBus(), getSessionName: () => undefined },
 			state: { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
-			config: {},
+			config,
 			asyncByDefault: false,
 			tempArtifactsDir: tempDir,
 			getSubagentSessionRoot: () => tempDir,
@@ -191,6 +218,84 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(output, "Hello from mock agent");
 	});
 
+	it("rejects duplicate concurrent subagent execution calls", async () => {
+		mockPi.onCall({ output: "first call completed", delay: 100 });
+		const executor = makeExecutor([makeAgent("echo")]);
+		const ctx = makeMinimalCtx(tempDir);
+
+		const first = executor.execute("first", { agent: "echo", task: "First call" }, new AbortController().signal, undefined, ctx);
+		const second = await executor.execute("second", { agent: "echo", task: "Duplicate call" }, new AbortController().signal, undefined, ctx);
+		const firstResult = await first;
+
+		assert.equal(firstResult.isError, undefined);
+		assert.equal(second.isError, true);
+		assert.match(second.content[0]?.text ?? "", /Issue exactly ONE subagent call per turn/);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("blocks total subagent spawns after the per-session quota", async () => {
+		mockPi.onCall({ output: "first call completed" });
+		const executor = makeExecutor([makeAgent("echo")], { maxSubagentSpawnsPerSession: 1 });
+		const ctx = makeMinimalCtx(tempDir);
+
+		const first = await executor.execute("first", { agent: "echo", task: "First call" }, new AbortController().signal, undefined, ctx);
+		const second = await executor.execute("second", { agent: "echo", task: "Second call" }, new AbortController().signal, undefined, ctx);
+
+		assert.equal(first.isError, undefined);
+		assert.equal(second.isError, true);
+		assert.match(second.content[0]?.text ?? "", /Subagent spawn limit reached for this session \(1\/1 used, 1 requested\)/);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("allows management actions while an execution call is in progress", async () => {
+		mockPi.onCall({ output: "first call completed", delay: 100 });
+		const executor = makeExecutor([makeAgent("echo")]);
+		const ctx = makeMinimalCtx(tempDir);
+
+		const first = executor.execute("first", { agent: "echo", task: "First call" }, new AbortController().signal, undefined, ctx);
+		const status = await executor.execute("status", { action: "status" }, new AbortController().signal, undefined, ctx);
+		const firstResult = await first;
+
+		assert.equal(firstResult.isError, undefined);
+		assert.equal(status.isError, undefined);
+		assert.doesNotMatch(status.content[0]?.text ?? "", /Rejected: a subagent call is already in progress/);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("allows intentional parallel tasks inside one subagent execution call", async () => {
+		mockPi.onCall({ output: "first parallel result" });
+		mockPi.onCall({ output: "second parallel result" });
+		const executor = makeExecutor([makeAgent("echo"), makeAgent("second")]);
+
+		const result = await executor.execute(
+			"parallel",
+			{ tasks: [{ agent: "echo", task: "First task" }, { agent: "second", task: "Second task" }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(mockPi.callCount(), 2);
+		assert.deepEqual(result.details?.totalCost, { inputTokens: 200, outputTokens: 100, costUsd: 0.002 });
+	});
+
+	it("reports total cost for foreground single runs", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "single result" });
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		const result = await executor.execute(
+			"single-cost",
+			{ agent: "echo", task: "Single task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(result.details?.totalCost, { inputTokens: 100, outputTokens: 50, costUsd: 0.001 });
+	});
+
 	it("fails implementation runs that complete without mutation attempts", async () => {
 		mockPi.onCall({ output: "Validation:\nlet rawFilename = params.filename.trim();" });
 		const agents = [makeAgent("worker")];
@@ -211,6 +316,25 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.deepEqual(result.controlEvents?.map((event) => event.message), [
 			"worker completed without making edits for an implementation task",
 		]);
+	});
+
+	it("returns captured output when the foreground executor fails an implementation run", async () => {
+		mockPi.onCall({ output: "Oracle review:\n- finding one\n- finding two" });
+		const executor = makeExecutor([makeAgent("oracle")]);
+
+		const result = await executor.execute(
+			"failed-single-output",
+			{ agent: "oracle", task: "Implement the approved file changes" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const text = result.content[0]?.text ?? "";
+		assert.equal(result.isError, true);
+		assert.match(text, /completed without making edits/);
+		assert.match(text, /Output:\nOracle review:\n- finding one\n- finding two/);
+		assert.match(text, /Output artifact: /);
 	});
 
 	it("fails future-tense implementation summaries when no mutation attempt occurred", async () => {
@@ -510,6 +634,38 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.exitCode, 0);
 		assert.equal(result.model, "anthropic/claude-sonnet-4");
 		assert.deepEqual(result.modelAttempts?.map((attempt) => attempt.success), [false, true]);
+	});
+
+	it("retries with fallback models when a zero-exit attempt has empty output", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "" }],
+					model: "openai/gpt-5-mini",
+					stopReason: "error",
+					usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 0,
+		});
+		mockPi.onCall({ output: "Recovered from empty output" });
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "fallback-zero-exit-empty-output",
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.model, "anthropic/claude-sonnet-4");
+		assert.equal(result.finalOutput, "Recovered from empty output");
+		assert.match(result.modelAttempts?.[0]?.error ?? "", /no output/i);
+		assert.deepEqual(result.modelAttempts?.map((attempt) => attempt.success), [false, true]);
+		assert.equal(mockPi.callCount(), 2);
 	});
 
 	it("fails zero-exit provider errors when no fallback succeeds", async () => {
@@ -884,6 +1040,77 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(fs.readFileSync(outputPath, "utf-8"), "fresh assistant output");
 	});
 
+	it("routes foreground single relative outputs to the run output artifact directory by default", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "default report" });
+		const executor = makeExecutor([makeAgent("researcher", { output: "context.md" })]);
+
+		const result = await executor.execute(
+			"single-default-output-base",
+			{ agent: "researcher", task: "Write report" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const taskArg = readCallArgs().at(-1) ?? "";
+		assert.equal(result.isError, undefined);
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(path.join(tempDir, ".pi-subagents", "artifacts", "outputs"))}.*context\\.md`));
+		assert.equal(fs.existsSync(path.join(tempDir, "context.md")), false);
+	});
+
+	it("routes foreground single relative outputs to configured singleRunOutputBaseDir", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "configured report" });
+		const configuredBase = path.join(tempDir, "configured-outputs");
+		const executor = makeExecutor(
+			[makeAgent("researcher", { output: "context.md" })],
+			{ singleRunOutputBaseDir: configuredBase },
+		);
+
+		const result = await executor.execute(
+			"single-configured-output-base",
+			{ agent: "researcher", task: "Write report" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const expectedOutputPath = path.join(configuredBase, "context.md");
+		const taskArg = readCallArgs().at(-1) ?? "";
+		assert.equal(result.isError, undefined);
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(expectedOutputPath)}`));
+		assert.equal(fs.readFileSync(expectedOutputPath, "utf-8"), "configured report");
+		assert.equal(fs.existsSync(path.join(tempDir, "context.md")), false);
+	});
+
+	it("makes task-level output overrides authoritative in the child system prompt", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "override report" });
+		const overridePath = path.join(tempDir, "custom-report.md");
+		const executor = makeExecutor([
+			makeAgent("researcher", {
+				output: "default-report.md",
+				systemPrompt: "Output format (`default-report.md`):\n\nWrite the full report to default-report.md.",
+			}),
+		]);
+
+		const result = await executor.execute(
+			"single-output-override-system-prompt",
+			{ agent: "researcher", task: "Write report", output: overridePath },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const call = readCall();
+		const taskArg = call.args.at(-1) ?? "";
+		const systemPrompt = call.systemPrompts[0]?.text ?? "";
+		assert.equal(result.isError, undefined);
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(overridePath)}`));
+		assert.match(systemPrompt, /Output format \(`default-report\.md`\):/);
+		assert.match(systemPrompt, /Runtime output path override:/);
+		assert.match(systemPrompt, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(overridePath)}`));
+		assert.match(systemPrompt, /Ignore any other output filename or output path mentioned elsewhere/);
+	});
+
 	it("treats string false as disabled output in foreground single runs", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "inline report" });
 		const executor = makeExecutor([makeAgent("echo", { output: "default-report.md" })]);
@@ -901,7 +1128,39 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.doesNotMatch(result.content[0]?.text ?? "", /Output saved to:/);
 		assert.equal(fs.existsSync(path.join(tempDir, "false")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, "default-report.md")), false);
-		assert.doesNotMatch(readCallArgs().at(-1) ?? "", /Write your findings to:/);
+		assert.doesNotMatch(readCallArgs().at(-1) ?? "", /Write your findings to(?: exactly this path)?:/);
+	});
+
+	it("rejects mismatched foreground timeout aliases before spawning", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"timeout-alias-validation",
+			{ agent: "echo", task: "Task", timeoutMs: 100, maxRuntimeMs: 200 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /aliases/);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
+	it("rejects foreground timeout settings for async runs before spawning", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"timeout-async-validation",
+			{ agent: "echo", task: "Task", async: true, timeoutMs: 100 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /foreground runs/);
+		assert.equal(mockPi.callCount(), 0);
 	});
 
 	it("rejects file-only mode without an output path before spawning", async () => {
@@ -1080,6 +1339,24 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.ok(extensionArgs.includes("./allowed-ext.ts"));
 	});
 
+	it("passes subagent-only extensions through to child execution", async () => {
+		mockPi.onCall({ output: "Done" });
+		const agents = [makeAgent("echo", {
+			tools: ["read"],
+			subagentOnlyExtensions: ["./child-only-tool.ts"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "subagent-only-extension",
+		});
+
+		assert.equal(result.exitCode, 0);
+		const args = readCallArgs();
+		const extensionArgs = args.filter((arg, index) => args[index - 1] === "--extension");
+		assert.ok(extensionArgs.some((arg) => arg.endsWith(path.join("src", "runs", "shared", "subagent-prompt-runtime.ts"))));
+		assert.ok(extensionArgs.includes("./child-only-tool.ts"));
+	});
+
 	it("treats forced drain after final assistant output as cleanup success", async () => {
 		mockPi.onCall({
 			jsonl: [events.assistantMessage("done-before-drain")],
@@ -1170,6 +1447,64 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		// Exit code is platform-dependent (Windows: often 1 or 0, Linux: null/143)
 	});
 
+	it("marks foreground runs that exceed timeoutMs as timed out", async () => {
+		mockPi.onCall({ delay: 10000 });
+		const agents = makeAgentConfigs(["slow"]);
+
+		const start = Date.now();
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			timeoutMs: 150,
+		});
+		const elapsed = Date.now() - start;
+
+		assert.ok(elapsed < 5000, `should time out early, took ${elapsed}ms`);
+		assert.notEqual(result.exitCode, 0);
+		assert.equal(result.timedOut, true);
+		assert.equal(result.error, "Subagent timed out after 150ms.");
+		assert.match(result.finalOutput ?? "", /Subagent timed out after 150ms\./);
+		assert.equal(result.progress.status, "failed");
+	});
+
+	it("does not run acceptance verification after a foreground timeout", async () => {
+		const markerPath = path.join(tempDir, "verify-ran.txt");
+		const report = [
+			"done",
+			"```acceptance-report",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "integration test evidence" }],
+				changedFiles: ["src/a.ts"],
+				testsAddedOrUpdated: ["test/a.test.ts"],
+				commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+				validationOutput: ["validation passed"],
+				residualRisks: [],
+				noStagedFiles: true,
+				notes: "complete",
+			}),
+			"```",
+		].join("\n");
+		mockPi.onCall({ jsonl: [events.assistantMessage(report)], keepAliveAfterFinalMessageMs: 10000 });
+		const agents = makeAgentConfigs(["slow"]);
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			timeoutMs: 150,
+			acceptance: {
+				level: "verified",
+				verify: [{
+					id: "marker",
+					command: "node -e \"require('node:fs').writeFileSync(process.env.VERIFY_MARKER, 'ran')\"",
+					env: { VERIFY_MARKER: markerPath },
+					timeoutMs: 10_000,
+				}],
+			},
+		});
+
+		assert.equal(result.timedOut, true);
+		assert.equal(result.acceptance?.status, "rejected");
+		assert.equal(result.acceptance?.runtimeChecks?.[0]?.id, "timeout");
+		assert.equal(result.acceptance?.verifyRuns?.length, 0);
+		assert.equal(fs.existsSync(markerPath), false);
+	});
+
 	it("soft-interrupts the current turn and returns a paused result", async () => {
 		mockPi.onCall({ delay: 10000 });
 		const agents = makeAgentConfigs(["slow"]);
@@ -1193,6 +1528,24 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.interrupted, true);
 		assert.equal(result.progress.activityState, undefined);
 		assert.deepEqual(controlEvents, []);
+		assert.match(result.finalOutput ?? "", /Interrupted/);
+	});
+
+	it("preserves manual interrupt semantics when a timeout is also configured", async () => {
+		mockPi.onCall({ delay: 10000 });
+		const agents = makeAgentConfigs(["slow"]);
+		const controller = new AbortController();
+
+		setTimeout(() => controller.abort(), 100);
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			interruptSignal: controller.signal,
+			timeoutMs: 500,
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.interrupted, true);
+		assert.equal(result.timedOut, undefined);
+		assert.equal(result.error, undefined);
 		assert.match(result.finalOutput ?? "", /Interrupted/);
 	});
 
@@ -1239,6 +1592,59 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			assert.equal(result.finalOutput, "Detached for intercom coordination.");
 			assert.equal(result.progress?.status, "detached");
 			assert.equal(accepted, true);
+		});
+	}
+
+	for (const testCase of [
+		{ name: "intercom ask", toolName: "intercom", args: { action: "ask", to: "orchestrator" } },
+		{ name: "contact_supervisor need_decision", toolName: "contact_supervisor", args: { reason: "need_decision", message: "Need a decision" } },
+		{ name: "contact_supervisor interview_request", toolName: "contact_supervisor", args: { reason: "interview_request", message: "Need input", interview: { questions: [] } } },
+	]) {
+		it(`proactively detaches foreground children on blocking ${testCase.name}`, async () => {
+			mockPi.onCall({
+				steps: [
+					{ jsonl: [events.toolStart(testCase.toolName, testCase.args)] },
+					{ delay: 1000, jsonl: [events.assistantMessage("received pong")] },
+				],
+			});
+			const agents = makeAgentConfigs(["echo"]);
+
+			const result = await runSync(tempDir, agents, "echo", "Task", {
+				runId: `${testCase.toolName}-blocking-detach`,
+				allowIntercomDetach: true,
+			});
+
+			assert.equal(result.exitCode, 0);
+			assert.equal(result.detached, true);
+			assert.equal(result.detachedReason, "intercom coordination");
+			assert.equal(result.finalOutput, "Detached for intercom coordination.");
+			assert.equal(result.progress?.status, "detached");
+		});
+	}
+
+	for (const testCase of [
+		{ name: "intercom send", toolName: "intercom", args: { action: "send", to: "orchestrator", message: "FYI" } },
+		{ name: "contact_supervisor progress_update", toolName: "contact_supervisor", args: { reason: "progress_update", message: "FYI" } },
+	]) {
+		it(`does not proactively detach foreground children on non-blocking ${testCase.name}`, async () => {
+			mockPi.onCall({
+				steps: [
+					{ jsonl: [events.toolStart(testCase.toolName, testCase.args)] },
+					{ jsonl: [events.toolEnd(testCase.toolName)] },
+					{ jsonl: [events.assistantMessage("done")] },
+				],
+			});
+			const agents = makeAgentConfigs(["echo"]);
+
+			const result = await runSync(tempDir, agents, "echo", "Task", {
+				runId: `${testCase.toolName}-nonblocking`,
+				allowIntercomDetach: true,
+			});
+
+			assert.equal(result.exitCode, 0);
+			assert.equal(result.detached, undefined);
+			assert.equal(result.finalOutput, "done");
+			assert.equal(result.progress?.status, "completed");
 		});
 	}
 

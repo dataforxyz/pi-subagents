@@ -16,6 +16,7 @@ interface MockPiResponse {
 		stderr?: string;
 	}>;
 	echoEnv?: string[];
+	matchArgIncludes?: string | string[];
 }
 
 export interface MockPi {

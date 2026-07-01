@@ -30,6 +30,8 @@ function createChildSafeState(): SubagentState {
 	return {
 		baseCwd: "",
 		currentSessionId: null,
+		subagentInProgress: false,
+		subagentSpawns: { sessionId: null, count: 0 },
 		asyncJobs: new Map(),
 		foregroundRuns: new Map(),
 		foregroundControls: new Map(),
@@ -156,7 +158,7 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): 
 		label: "Subagent",
 		description: [
 			"Delegate to subagents from child-safe fanout mode.",
-			"Allowed management/control actions: list, get, status, interrupt, resume, doctor.",
+			"Allowed management/control actions: list, get, status, interrupt, resume, append-step, doctor.",
 			"Agent config mutation actions create, update, and delete are blocked in this mode.",
 		].join("\n"),
 		parameters: SubagentParams,

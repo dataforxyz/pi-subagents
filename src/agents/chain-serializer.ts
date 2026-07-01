@@ -4,6 +4,7 @@ import { parseFrontmatter } from "./frontmatter.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../runs/shared/chain-outputs.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import type { ChainStep } from "../shared/settings.ts";
+import type { AgentSource } from "./agents.ts";
 
 function parseStepBody(agent: string, sectionBody: string): ChainStepConfig {
 	const lines = sectionBody.split("\n");
@@ -83,7 +84,7 @@ function parseStepBody(agent: string, sectionBody: string): ChainStepConfig {
 	return step;
 }
 
-export function parseChain(content: string, source: "user" | "project", filePath: string): ChainConfig {
+export function parseChain(content: string, source: AgentSource, filePath: string): ChainConfig {
 	const { frontmatter, body } = parseFrontmatter(content);
 	if (!frontmatter.name || !frontmatter.description) {
 		throw new Error("Chain frontmatter must include name and description");
@@ -124,7 +125,7 @@ export function parseChain(content: string, source: "user" | "project", filePath
 	};
 }
 
-export function parseJsonChain(content: string, source: "user" | "project", filePath: string): ChainConfig {
+export function parseJsonChain(content: string, source: AgentSource, filePath: string): ChainConfig {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(content);

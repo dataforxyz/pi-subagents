@@ -10,12 +10,15 @@ import { loadConfig } from "../../src/extension/config.ts";
 import { diagnoseIntercomBridge, resolveIntercomBridge } from "../../src/intercom/intercom-bridge.ts";
 import { loadRunsForAgent, recordRun } from "../../src/runs/shared/run-history.ts";
 import { cleanupAllArtifactDirs } from "../../src/shared/artifacts.ts";
-import { getAgentDir } from "../../src/shared/utils.ts";
+import { getAgentDir, getConfigDirName, getProjectConfigDir, resolveConfigDirName } from "../../src/shared/utils.ts";
 
 let tempDir = "";
 let agentDir = "";
+let tempHome = "";
 let cwd = "";
 let oldAgentDir: string | undefined;
+let oldHome: string | undefined;
+let oldUserProfile: string | undefined;
 
 function writeFile(filePath: string, content: string): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -33,10 +36,16 @@ function readText(result: { content: Array<{ type: string; text?: string }> }): 
 describe("PI_CODING_AGENT_DIR runtime paths", () => {
 	beforeEach(() => {
 		oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+		oldHome = process.env.HOME;
+		oldUserProfile = process.env.USERPROFILE;
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-coding-agent-dir-"));
+		tempHome = path.join(tempDir, "home");
 		agentDir = path.join(tempDir, "agent");
 		cwd = path.join(tempDir, "workspace");
 		fs.mkdirSync(cwd, { recursive: true });
+		fs.mkdirSync(tempHome, { recursive: true });
+		process.env.HOME = tempHome;
+		process.env.USERPROFILE = tempHome;
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		clearSkillCache();
 	});
@@ -44,21 +53,29 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 	afterEach(() => {
 		if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+		if (oldHome === undefined) delete process.env.HOME;
+		else process.env.HOME = oldHome;
+		if (oldUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = oldUserProfile;
 		clearSkillCache();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
 	it("resolves the agent dir dynamically and loads extension config from it", () => {
+		assert.equal(resolveConfigDirName({ CONFIG_DIR_NAME: ".custom-pi" }), ".custom-pi");
+		assert.equal(resolveConfigDirName({ CONFIG_DIR_NAME: "" }), ".pi");
+		assert.equal(getConfigDirName(), ".pi");
+		assert.equal(getProjectConfigDir(cwd), path.join(cwd, ".pi"));
 		assert.equal(getAgentDir(), agentDir);
 
 		process.env.PI_CODING_AGENT_DIR = "~";
-		assert.equal(getAgentDir(), os.homedir());
+		assert.equal(getAgentDir(), tempHome);
 
 		process.env.PI_CODING_AGENT_DIR = "~/custom-agent-dir";
-		assert.equal(getAgentDir(), path.join(os.homedir(), "custom-agent-dir"));
+		assert.equal(getAgentDir(), path.join(tempHome, "custom-agent-dir"));
 
 		delete process.env.PI_CODING_AGENT_DIR;
-		assert.equal(getAgentDir(), path.join(os.homedir(), ".pi", "agent"));
+		assert.equal(getAgentDir(), path.join(tempHome, ".pi", "agent"));
 
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");

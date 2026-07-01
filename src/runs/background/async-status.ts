@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
-import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode, type TokenUsage } from "../../shared/types.ts";
+import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type NestedRunSummary, type SubagentRunMode, type TokenUsage } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { attachRootChildrenToSteps, findNestedRouteForRootId, projectNestedRegistryForRoot } from "../shared/nested-events.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
@@ -29,6 +29,7 @@ interface AsyncRunStepSummary {
 	toolCount?: number;
 	durationMs?: number;
 	tokens?: TokenUsage;
+	totalCost?: CostSummary;
 	skills?: string[];
 	model?: string;
 	thinking?: string;
@@ -56,11 +57,13 @@ export interface AsyncRunSummary {
 	endedAt?: number;
 	currentStep?: number;
 	chainStepCount?: number;
+	pendingAppends?: number;
 	parallelGroups?: AsyncParallelGroupStatus[];
 	steps: AsyncRunStepSummary[];
 	sessionDir?: string;
 	outputFile?: string;
 	totalTokens?: TokenUsage;
+	totalCost?: CostSummary;
 	sessionFile?: string;
 	nestedChildren?: NestedRunSummary[];
 	nestedWarnings?: string[];
@@ -160,6 +163,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.toolCount !== undefined ? { toolCount: step.toolCount } : {}),
 			...(step.durationMs !== undefined ? { durationMs: step.durationMs } : {}),
 			...(step.tokens ? { tokens: step.tokens } : {}),
+			...(step.totalCost ? { totalCost: step.totalCost } : {}),
 			...(step.skills ? { skills: step.skills } : {}),
 			...(step.model ? { model: step.model } : {}),
 			...(step.thinking ? { thinking: step.thinking } : {}),
@@ -188,6 +192,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		endedAt: status.endedAt,
 		currentStep: status.currentStep,
 		...(status.chainStepCount !== undefined ? { chainStepCount: status.chainStepCount } : {}),
+		...(status.pendingAppends !== undefined ? { pendingAppends: status.pendingAppends } : {}),
 		...(parallelGroups.length ? { parallelGroups } : {}),
 		steps: summarizedSteps,
 		...(nestedChildren.length ? { nestedChildren } : {}),
@@ -195,6 +200,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		...(status.sessionDir ? { sessionDir: status.sessionDir } : {}),
 		...(status.outputFile ? { outputFile: status.outputFile } : {}),
 		...(status.totalTokens ? { totalTokens: status.totalTokens } : {}),
+		...(status.totalCost ? { totalCost: status.totalCost } : {}),
 		...(status.sessionFile ? { sessionFile: status.sessionFile } : {}),
 	};
 }
@@ -309,7 +315,8 @@ function formatRunHeader(run: AsyncRunSummary): string {
 	const stepLabel = formatAsyncRunProgressLabel(run);
 	const cwd = run.cwd ? shortenPath(run.cwd) : shortenPath(run.asyncDir);
 	const activity = formatActivityFacts(run);
-	return `${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel} | ${cwd}`;
+	const pending = run.pendingAppends ? ` | ${run.pendingAppends} pending append${run.pendingAppends === 1 ? "" : "s"}` : "";
+	return `${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel}${pending} | ${cwd}`;
 }
 
 export function formatAsyncRunList(runs: AsyncRunSummary[], heading = "Active async runs"): string {

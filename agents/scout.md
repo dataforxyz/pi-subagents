@@ -28,7 +28,7 @@ Working rules:
 - If you are told to write output, write it to the provided path and keep the final response short.
 - When running solo, summarize what you found after writing the output.
 
-Output format (`context.md`):
+Output format:
 
 # Code Context
 

@@ -10,24 +10,29 @@ import {
 	formatAcceptancePrompt,
 	parseAcceptanceReport,
 	resolveEffectiveAcceptance,
+	stripAcceptanceReport,
 	validateAcceptanceInput,
 } from "../../src/runs/shared/acceptance.ts";
 
-function report(overrides: Record<string, unknown> = {}): string {
+function reportData(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "verified in test" }],
+		changedFiles: ["src/file.ts"],
+		testsAddedOrUpdated: ["test/file.test.ts"],
+		commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+		validationOutput: ["tests passed"],
+		residualRisks: [],
+		noStagedFiles: true,
+		notes: "complete",
+		...overrides,
+	};
+}
+
+function report(overrides: Record<string, unknown> = {}, fence = "acceptance-report"): string {
 	return [
 		"done",
-		"```acceptance-report",
-		JSON.stringify({
-			criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "verified in test" }],
-			changedFiles: ["src/file.ts"],
-			testsAddedOrUpdated: ["test/file.test.ts"],
-			commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
-			validationOutput: ["tests passed"],
-			residualRisks: [],
-			noStagedFiles: true,
-			notes: "complete",
-			...overrides,
-		}),
+		`\`\`\`${fence}`,
+		JSON.stringify(reportData(overrides)),
 		"```",
 	].join("\n");
 }
@@ -72,9 +77,11 @@ describe("acceptance gates", () => {
 		assert.match(prompt, /Acceptance level: checked/);
 		assert.match(prompt, /Patch the bug/);
 		assert.match(prompt, /```acceptance-report/);
+		assert.match(prompt, /array fields contain strings/);
+		assert.match(prompt, /"reviewFindings": \[\n    "blocker:/);
 	});
 
-	it("parses only explicit acceptance-report fences", () => {
+	it("parses acceptance-report fences and ignores unrelated json fences", () => {
 		const parsed = parseAcceptanceReport(report());
 
 		assert.ok(parsed.report);
@@ -87,9 +94,111 @@ describe("acceptance gates", () => {
 		assert.equal(genericJson.report, undefined);
 		assert.match(genericJson.error ?? "", /Structured acceptance report not found/);
 
+		const criteriaOnlyJson = parseAcceptanceReport(`done\n\
+\
+\`\`\`json\n{\"criteriaSatisfied\":[{\"id\":\"criterion-1\",\"status\":\"satisfied\",\"evidence\":\"example\"}]}\n\`\`\``);
+		assert.equal(criteriaOnlyJson.report, undefined);
+		assert.match(criteriaOnlyJson.error ?? "", /Structured acceptance report not found/);
+
+		const invalidSignalJson = `done\n\
+\
+\`\`\`json\n{\"criteriaSatisfied\":[{\"id\":\"criterion-1\",\"status\":\"satisfied\",\"evidence\":\"example\"}],\"changedFiles\":false}\n\`\`\``;
+		const genericJsonWithInvalidSignal = parseAcceptanceReport(invalidSignalJson);
+		assert.equal(genericJsonWithInvalidSignal.report, undefined);
+		assert.match(genericJsonWithInvalidSignal.error ?? "", /Structured acceptance report not found/);
+		assert.equal(stripAcceptanceReport(invalidSignalJson), invalidSignalJson);
+
+		const partialWrapperJson = `done\n\
+\
+\`\`\`json\n{\"acceptance\":{\"changedFiles\":[\"src/file.ts\"]}}\n\`\`\``;
+		const genericJsonWithPartialWrapper = parseAcceptanceReport(partialWrapperJson);
+		assert.equal(genericJsonWithPartialWrapper.report, undefined);
+		assert.match(genericJsonWithPartialWrapper.error ?? "", /Structured acceptance report not found/);
+		assert.equal(stripAcceptanceReport(partialWrapperJson), partialWrapperJson);
+
+		const reportShapedJson = `done\n\
+\
+\`\`\`json\n{\"changedFiles\":[\"src/file.ts\"]}\n\`\`\``;
+		const genericReportShapedJson = parseAcceptanceReport(reportShapedJson);
+		assert.equal(genericReportShapedJson.report, undefined);
+		assert.match(genericReportShapedJson.error ?? "", /Structured acceptance report not found/);
+		assert.equal(stripAcceptanceReport(reportShapedJson), reportShapedJson);
+
 		const malformed = parseAcceptanceReport("```acceptance-report\n{bad-json\n```");
 		assert.equal(malformed.report, undefined);
 		assert.match(malformed.error ?? "", /Failed to parse acceptance-report/);
+	});
+
+	it("parses acceptance reports from json-family fences", () => {
+		for (const fence of ["json", "jsonc", "json5"]) {
+			const output = report({}, fence);
+			const parsed = parseAcceptanceReport(output);
+
+			assert.ok(parsed.report);
+			assert.deepEqual(parsed.report.changedFiles, ["src/file.ts"]);
+			assert.equal(parsed.error, undefined);
+			assert.equal(stripAcceptanceReport(output), "done");
+		}
+	});
+
+	it("strips trailing json-family reports after earlier unrelated json fences", () => {
+		const output = [
+			"metadata",
+			"```json",
+			JSON.stringify({ notes: "not an acceptance report" }),
+			"```",
+			"done",
+			"```json",
+			JSON.stringify(reportData()),
+			"```",
+		].join("\n");
+		const parsed = parseAcceptanceReport(output);
+
+		assert.ok(parsed.report);
+		assert.equal(stripAcceptanceReport(output), [
+			"metadata",
+			"```json",
+			JSON.stringify({ notes: "not an acceptance report" }),
+			"```",
+			"done",
+		].join("\n"));
+	});
+
+	it("unwraps acceptance-report wrapper objects", () => {
+		const output = [
+			"done",
+			"```json",
+			JSON.stringify({ "acceptance-report": reportData() }),
+			"```",
+		].join("\n");
+		const parsed = parseAcceptanceReport(output);
+
+		assert.ok(parsed.report);
+		assert.deepEqual(parsed.report.testsAddedOrUpdated, ["test/file.test.ts"]);
+		assert.equal(stripAcceptanceReport(output), "done");
+	});
+
+	it("reports field-level validation errors for malformed acceptance-report fields", () => {
+		const invalidReviewerReport = parseAcceptanceReport(report({
+			reviewFindings: [{ id: "B-1", severity: "blocker", finding: "Missing evidence" }],
+		}));
+		assert.equal(invalidReviewerReport.report, undefined);
+		assert.match(invalidReviewerReport.error ?? "", /reviewFindings\[0\]: expected string; got object/);
+
+		const invalidCommandReport = parseAcceptanceReport(report({
+			commandsRun: [{ command: "npm test", exitCode: 0 }],
+		}));
+		assert.equal(invalidCommandReport.report, undefined);
+		assert.match(invalidCommandReport.error ?? "", /commandsRun\[0\]\.result: expected one of "passed", "failed", "not-run"; got missing/);
+		assert.match(invalidCommandReport.error ?? "", /commandsRun\[0\]\.summary: expected string; got missing/);
+
+		const invalidCriteriaReport = parseAcceptanceReport(report({
+			criteriaSatisfied: [{ id: 7, status: "done", evidence: "" }],
+		}));
+		assert.equal(invalidCriteriaReport.report, undefined);
+		assert.match(invalidCriteriaReport.error ?? "", /criteriaSatisfied\[0\]\.id: expected string; got number 7/);
+		assert.match(invalidCriteriaReport.error ?? "", /criteriaSatisfied\[0\]\.status: expected one of "satisfied", "not-satisfied", "not-applicable"; got "done"/);
+		assert.match(invalidCriteriaReport.error ?? "", /criteriaSatisfied\[0\]\.evidence: expected non-empty string; got ""/);
 	});
 
 	it("explicit none disables inferred gates when a reason is present", () => {
@@ -119,6 +228,28 @@ describe("acceptance gates", () => {
 
 			assert.equal(ledger.status, "rejected");
 			assert.match(acceptanceFailureMessage(ledger) ?? "", /tests-added evidence missing/);
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("surfaces parse validation details in acceptance failure messages", async () => {
+		const cwd = tempRepo();
+		try {
+			const acceptance = resolveEffectiveAcceptance({
+				agentName: "reviewer",
+				task: "Review-only. Do not edit.",
+				explicit: { level: "attested", evidence: ["review-findings"] },
+			});
+			const ledger = await evaluateAcceptance({
+				acceptance,
+				output: report({ reviewFindings: [{ id: "B-1", finding: "Missing evidence" }] }),
+				cwd,
+			});
+
+			assert.equal(ledger.status, "rejected");
+			assert.match(acceptanceFailureMessage(ledger) ?? "", /Failed to parse acceptance-report/);
+			assert.match(acceptanceFailureMessage(ledger) ?? "", /reviewFindings\[0\]: expected string; got object/);
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
@@ -278,5 +409,16 @@ describe("acceptance gates", () => {
 	it("validates invalid disable and verify shapes", () => {
 		assert.deepEqual(validateAcceptanceInput({ level: "none" }), ["acceptance.reason is required when level is none."]);
 		assert.deepEqual(validateAcceptanceInput({ verify: [{ id: "missing-command" }] }), ["acceptance.verify[0].command is required."]);
+		assert.deepEqual(validateAcceptanceInput({ verify: [{ id: "fractional", command: "npm test", timeoutMs: 1.5 }] }), ["acceptance.verify[0].timeoutMs must be an integer >= 1."]);
+		assert.deepEqual(validateAcceptanceInput(false), []);
+		assert.deepEqual(validateAcceptanceInput("checked"), []);
+		assert.deepEqual(validateAcceptanceInput({ criteria: ["ship the fix"], review: false, stopRules: ["stay scoped"] }), []);
+		assert.match(validateAcceptanceInput({ criteria: [{ id: "missing-must" }] }).join("\n"), /acceptance\.criteria\[0\]\.must is required/);
+		assert.match(validateAcceptanceInput({ criteria: [123] }).join("\n"), /acceptance\.criteria\[0\] must be a string or an object/);
+		assert.match(validateAcceptanceInput({ evidence: ["bogus"] }).join("\n"), /acceptance\.evidence\[0\] is not a supported evidence kind/);
+		assert.match(validateAcceptanceInput({ review: true }).join("\n"), /acceptance\.review must be false or an object/);
+		assert.match(validateAcceptanceInput({ review: { required: "yes" } }).join("\n"), /acceptance\.review\.required must be a boolean/);
+		assert.match(validateAcceptanceInput({ stopRules: [123] }).join("\n"), /acceptance\.stopRules\[0\] must be a string/);
+		assert.match(validateAcceptanceInput({ surprise: true }).join("\n"), /acceptance\.surprise is not supported/);
 	});
 });

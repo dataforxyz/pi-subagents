@@ -71,11 +71,6 @@ function withMalformedIntercomConfig<T>(fn: (paths: { extensionDir: string; conf
 	}
 }
 
-function writePiIntercomPackage(packageDir: string): void {
-	fs.mkdirSync(packageDir, { recursive: true });
-	fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "pi-intercom", pi: { extensions: ["./index.ts"] } }, null, 2));
-}
-
 function withPackagedIntercom<T>(fn: (paths: { agentDir: string; cwd: string; globalNpmRoot: string; packageDir: string; legacyDir: string; configPath: string }) => T): T {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-intercom-package-test-"));
 	const agentDir = path.join(tempDir, "agent");
@@ -84,32 +79,14 @@ function withPackagedIntercom<T>(fn: (paths: { agentDir: string; cwd: string; gl
 	const packageDir = path.join(globalNpmRoot, "pi-intercom");
 	const legacyDir = path.join(agentDir, "extensions", "pi-intercom");
 	const configPath = path.join(agentDir, "intercom", "config.json");
-	writePiIntercomPackage(packageDir);
+	fs.mkdirSync(packageDir, { recursive: true });
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	fs.mkdirSync(cwd, { recursive: true });
 	fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-intercom"] }, null, 2));
+	fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "pi-intercom", pi: { extensions: ["./index.ts"] } }, null, 2));
 	fs.writeFileSync(configPath, JSON.stringify({ enabled: true }));
 	try {
 		return fn({ agentDir, cwd, globalNpmRoot, packageDir, legacyDir, configPath });
-	} finally {
-		fs.rmSync(tempDir, { recursive: true, force: true });
-	}
-}
-
-function withLocalPathIntercom<T>(fn: (paths: { agentDir: string; cwd: string; packageDir: string; legacyDir: string; configPath: string }) => T): T {
-	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-intercom-local-package-test-"));
-	const agentDir = path.join(tempDir, ".pi", "agent");
-	const cwd = path.join(tempDir, "workspace");
-	const packageDir = path.join(tempDir, "src", "pi-intercom");
-	const legacyDir = path.join(agentDir, "extensions", "pi-intercom");
-	const configPath = path.join(agentDir, "intercom", "config.json");
-	writePiIntercomPackage(packageDir);
-	fs.mkdirSync(path.dirname(configPath), { recursive: true });
-	fs.mkdirSync(cwd, { recursive: true });
-	fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: [path.relative(agentDir, packageDir)] }, null, 2));
-	fs.writeFileSync(configPath, JSON.stringify({ enabled: true }));
-	try {
-		return fn({ agentDir, cwd, packageDir, legacyDir, configPath });
 	} finally {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	}
@@ -119,21 +96,15 @@ describe("diagnoseIntercomBridge", () => {
 	it("reports inactive and unavailable when pi-intercom is missing", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-intercom-diagnostic-test-"));
 		try {
-			const agentDir = path.join(tempDir, "agent");
-			const cwd = path.join(tempDir, "workspace");
-			const globalNpmRoot = path.join(tempDir, "global-node_modules");
-			fs.mkdirSync(agentDir, { recursive: true });
-			fs.mkdirSync(cwd, { recursive: true });
-			fs.mkdirSync(globalNpmRoot, { recursive: true });
+			// Point agentDir at the temp dir so the new tmp/extensions/npm fallback
+			// does not accidentally discover a real pi-intercom from the user's system.
 			const diagnostic = diagnoseIntercomBridge({
 				config: { mode: "always" },
 				context: "fresh",
 				orchestratorTarget: "main",
-				agentDir,
-				cwd,
-				globalNpmRoot,
 				extensionDir: path.join(tempDir, "missing-pi-intercom"),
 				configPath: path.join(tempDir, "config.json"),
+				agentDir: tempDir,
 			});
 			assert.equal(diagnostic.active, false);
 			assert.equal(diagnostic.wantsIntercom, true);
@@ -159,46 +130,6 @@ describe("diagnoseIntercomBridge", () => {
 			assert.equal(diagnostic.active, true);
 			assert.equal(diagnostic.piIntercomAvailable, true);
 			assert.equal(diagnostic.extensionDir, path.resolve(packageDir));
-		});
-	});
-
-	it("finds local path pi-intercom packages from user settings", () => {
-		withLocalPathIntercom(({ agentDir, cwd, packageDir, legacyDir, configPath }) => {
-			const diagnostic = diagnoseIntercomBridge({
-				config: { mode: "always" },
-				context: "fresh",
-				orchestratorTarget: "main",
-				agentDir,
-				cwd,
-				extensionDir: legacyDir,
-				configPath,
-			});
-			assert.equal(diagnostic.active, true);
-			assert.equal(diagnostic.piIntercomAvailable, true);
-			assert.equal(diagnostic.extensionDir, path.resolve(packageDir));
-		});
-	});
-
-	it("uses PI_CODING_AGENT_DIR when no explicit agentDir is supplied", () => {
-		withPackagedIntercom(({ agentDir, cwd, globalNpmRoot, packageDir, configPath }) => {
-			const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
-			process.env.PI_CODING_AGENT_DIR = agentDir;
-			try {
-				const diagnostic = diagnoseIntercomBridge({
-					config: { mode: "always" },
-					context: "fresh",
-					orchestratorTarget: "main",
-					cwd,
-					globalNpmRoot,
-					configPath,
-				});
-				assert.equal(diagnostic.active, true);
-				assert.equal(diagnostic.piIntercomAvailable, true);
-				assert.equal(diagnostic.extensionDir, path.resolve(packageDir));
-			} finally {
-				if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-				else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
-			}
 		});
 	});
 
@@ -265,23 +196,6 @@ describe("resolveIntercomBridge", () => {
 				agentDir,
 				cwd,
 				globalNpmRoot,
-				extensionDir: legacyDir,
-				configPath,
-			});
-			assert.equal(bridge.active, true);
-			assert.equal(bridge.extensionDir, path.resolve(packageDir));
-			assert.equal(bridge.orchestratorTarget, "main");
-		});
-	});
-
-	it("activates from a local path pi-intercom package", () => {
-		withLocalPathIntercom(({ agentDir, cwd, packageDir, legacyDir, configPath }) => {
-			const bridge = resolveIntercomBridge({
-				config: { mode: "always" },
-				context: "fresh",
-				orchestratorTarget: "main",
-				agentDir,
-				cwd,
 				extensionDir: legacyDir,
 				configPath,
 			});

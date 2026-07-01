@@ -21,6 +21,7 @@ import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
 import { markSubagentActivity } from "../../extension/quiescence.ts";
+import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
 
 interface AsyncJobTrackerOptions {
 	completionRetentionMs?: number;
@@ -59,11 +60,16 @@ function formatLowWatermarkMessage(input: {
 	return `Subagent pool low-watermark: ${input.active} active running step${input.active === 1 ? "" : "s"} below threshold ${input.lowWatermark} for run ${input.runId} (${extras.join(", ")}). Consider launching more independent subagents if useful.`;
 }
 
+const CONTROL_EVENT_READ_CHUNK_BYTES = 64 * 1024;
+const MAX_CONTROL_EVENT_LINE_BYTES = 1024 * 1024;
+const CONTROL_EVENT_SCAN_WINDOW_BYTES = 2 * 1024 * 1024;
+
 export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: SubagentState, asyncDirRoot: string, options: AsyncJobTrackerOptions = {}): {
 	ensurePoller: () => void;
 	handleStarted: (data: unknown) => void;
 	handleComplete: (data: unknown) => void;
 	resetJobs: (ctx?: ExtensionContext) => void;
+	restoreActiveJobs: (ctx?: ExtensionContext) => void;
 } {
 	const completionRetentionMs = options.completionRetentionMs ?? 10000;
 	const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -71,6 +77,55 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	const rerenderWidget = (ctx: ExtensionContext, jobs = Array.from(state.asyncJobs.values())) => {
 		renderWidget(ctx, jobs);
 		ctx.ui.requestRender?.();
+	};
+	const restoredControlEventCursor = (asyncDir: string) => {
+		try {
+			return fs.statSync(path.join(asyncDir, "events.jsonl")).size;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+			throw error;
+		}
+	};
+	const summaryToJob = (run: AsyncRunSummary): AsyncJobState => {
+		const groups = normalizeParallelGroups(run.parallelGroups, run.steps.length, run.chainStepCount ?? run.steps.length);
+		const activeGroup = run.currentStep !== undefined
+			? groups.find((group) => run.currentStep! >= group.start && run.currentStep! < group.start + group.count)
+			: undefined;
+		const visibleSteps = activeGroup
+			? run.steps.slice(activeGroup.start, activeGroup.start + activeGroup.count).map((step, index) => ({ ...step, index: activeGroup.start + index }))
+			: run.steps.map((step, index) => ({ ...step, index }));
+		return {
+			asyncId: run.id,
+			asyncDir: run.asyncDir,
+			status: run.state,
+			sessionId: run.sessionId,
+			activityState: run.activityState,
+			lastActivityAt: run.lastActivityAt,
+			currentTool: run.currentTool,
+			currentToolStartedAt: run.currentToolStartedAt,
+			currentPath: run.currentPath,
+			turnCount: run.turnCount,
+			toolCount: run.toolCount,
+			mode: run.mode,
+			agents: visibleSteps.map((step) => step.agent),
+			currentStep: run.currentStep,
+			chainStepCount: run.chainStepCount,
+			parallelGroups: groups,
+			steps: visibleSteps,
+			stepsTotal: visibleSteps.length,
+			runningSteps: visibleSteps.filter((step) => step.status === "running").length,
+			completedSteps: visibleSteps.filter((step) => step.status === "complete" || step.status === "completed").length,
+			hasParallelGroups: groups.length > 0,
+			activeParallelGroup: Boolean(activeGroup),
+			startedAt: run.startedAt,
+			updatedAt: run.lastUpdate ?? run.startedAt,
+			sessionDir: run.sessionDir,
+			outputFile: run.outputFile,
+			totalTokens: run.totalTokens,
+			sessionFile: run.sessionFile,
+			controlEventCursor: restoredControlEventCursor(run.asyncDir),
+			nestedChildren: run.nestedChildren,
+		};
 	};
 	const cancelCleanup = (asyncId: string) => {
 		const existingTimer = state.cleanupTimers.get(asyncId);
@@ -126,23 +181,22 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		}
 		try {
 			const stat = fs.fstatSync(fd);
-			const cursor = stat.size < (job.controlEventCursor ?? 0) ? 0 : (job.controlEventCursor ?? 0);
+			const savedCursor = job.controlEventCursor;
+			let cursor = stat.size < (savedCursor ?? 0) ? 0 : (savedCursor ?? 0);
+			const startedFromTail = savedCursor === undefined && stat.size > CONTROL_EVENT_SCAN_WINDOW_BYTES;
+			if (startedFromTail) cursor = stat.size - CONTROL_EVENT_SCAN_WINDOW_BYTES;
 			if (stat.size <= cursor) return;
-			const buffer = Buffer.alloc(stat.size - cursor);
-			fs.readSync(fd, buffer, 0, buffer.length, cursor);
-			const lastNewline = buffer.lastIndexOf(0x0a);
-			if (lastNewline === -1) return;
-			job.controlEventCursor = cursor + lastNewline + 1;
-			for (const line of buffer.subarray(0, lastNewline).toString("utf-8").split("\n")) {
-				if (!line.trim()) continue;
+			const scanEnd = Math.min(stat.size, cursor + CONTROL_EVENT_SCAN_WINDOW_BYTES);
+			const handleLine = (line: string) => {
+				if (!line.trim()) return;
 				let parsed: unknown;
 				try {
 					parsed = JSON.parse(line);
 				} catch (error) {
 					console.error(`Ignoring malformed async control event in '${eventsPath}':`, error);
-					continue;
+					return;
 				}
-				if (!parsed || typeof parsed !== "object") continue;
+				if (!parsed || typeof parsed !== "object") return;
 				const eventType = (parsed as { type?: unknown }).type;
 				if (eventType === "subagent.step.completed" || eventType === "subagent.step.failed") {
 					const record = parsed as {
@@ -169,11 +223,11 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 						sessionFile: record.sessionFile,
 						intercomTarget: record.intercomTarget,
 					});
-					continue;
+					return;
 				}
-				if (eventType !== "subagent.control") continue;
+				if (eventType !== "subagent.control") return;
 				const record = parsed as { event?: ControlEvent; channels?: string[]; childIntercomTarget?: string; noticeText?: string; intercom?: { to?: string; message?: string } };
-				if (!record.event || !Array.isArray(record.channels)) continue;
+				if (!record.event || !Array.isArray(record.channels)) return;
 				const payload = {
 					event: record.event,
 					source: "async" as const,
@@ -191,7 +245,48 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 						message: record.intercom.message,
 					});
 				}
+			};
+			let readCursor = cursor;
+			let lastCompleteCursor = cursor;
+			let lineParts: Buffer[] = [];
+			let lineBytes = 0;
+			let skippingOversizedLine = startedFromTail;
+			const appendLineSegment = (segment: Buffer) => {
+				if (segment.length === 0 || skippingOversizedLine) return;
+				if (lineBytes + segment.length > MAX_CONTROL_EVENT_LINE_BYTES) {
+					lineParts = [];
+					lineBytes = 0;
+					skippingOversizedLine = true;
+					return;
+				}
+				lineParts.push(segment);
+				lineBytes += segment.length;
+			};
+			while (readCursor < scanEnd) {
+				const toRead = Math.min(CONTROL_EVENT_READ_CHUNK_BYTES, scanEnd - readCursor);
+				const buffer = Buffer.alloc(toRead);
+				const bytesRead = fs.readSync(fd, buffer, 0, toRead, readCursor);
+				if (bytesRead <= 0) break;
+				const chunk = bytesRead === buffer.length ? buffer : buffer.subarray(0, bytesRead);
+				let lineStart = 0;
+				for (let index = 0; index < chunk.length; index++) {
+					if (chunk[index] !== 0x0a) continue;
+					appendLineSegment(chunk.subarray(lineStart, index));
+					if (!skippingOversizedLine && lineBytes > 0) {
+						handleLine(Buffer.concat(lineParts, lineBytes).toString("utf-8"));
+					}
+					lineParts = [];
+					lineBytes = 0;
+					skippingOversizedLine = false;
+					lastCompleteCursor = readCursor + index + 1;
+					lineStart = index + 1;
+				}
+				appendLineSegment(chunk.subarray(lineStart));
+				readCursor += bytesRead;
+				if (skippingOversizedLine) job.controlEventCursor = readCursor;
 			}
+			if (lastCompleteCursor > cursor) job.controlEventCursor = lastCompleteCursor;
+			else if (scanEnd < stat.size || startedFromTail) job.controlEventCursor = scanEnd;
 		} catch (error) {
 			console.error(`Failed to read async control events for '${job.asyncDir}':`, error);
 		} finally {
@@ -354,6 +449,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			...(typeof info.notify?.lowWatermark === "number" && Number.isInteger(info.notify.lowWatermark) && info.notify.lowWatermark >= 1
 				? { lowWatermark: info.notify.lowWatermark, lowWatermarkArmed: true }
 				: {}),
+			controlEventCursor: 0,
 		});
 		ensurePoller();
 		if (state.lastUiContext) {
@@ -401,5 +497,22 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		}
 	};
 
-	return { ensurePoller, handleStarted, handleComplete, resetJobs };
+	const restoreActiveJobs = (ctx?: ExtensionContext) => {
+		if (ctx?.hasUI) state.lastUiContext = ctx;
+		let runs: AsyncRunSummary[];
+		try {
+			runs = listAsyncRuns(asyncDirRoot, { states: ["queued", "running"], resultsDir, kill: options.kill, now: options.now });
+		} catch (error) {
+			console.error(`Failed to restore active async jobs from '${asyncDirRoot}':`, error);
+			return;
+		}
+		for (const run of runs) {
+			state.asyncJobs.set(run.id, summaryToJob(run));
+		}
+		if (runs.length === 0) return;
+		ensurePoller();
+		if (state.lastUiContext?.hasUI) rerenderWidget(state.lastUiContext);
+	};
+
+	return { ensurePoller, handleStarted, handleComplete, resetJobs, restoreActiveJobs };
 }

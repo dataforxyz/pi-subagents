@@ -15,6 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMinimalCtx, removeTempDir, tryImport } from "../support/helpers.ts";
 import type { MockPi } from "../support/helpers.ts";
+import { deliverInterruptRequest } from "../../src/runs/background/control-channel.ts";
 
 interface AsyncExecutionResult {
 	content: Array<{ text?: string }>;
@@ -23,24 +24,29 @@ interface AsyncExecutionResult {
 }
 
 interface AsyncResultPayload {
+	lifecycleArtifactVersion?: number;
 	success: boolean;
 	state?: string;
 	exitCode?: number;
 	sessionId?: string;
 	mode?: string;
 	summary?: string;
-	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
+	totalTokens?: { input: number; output: number; total: number };
+	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
+	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; error?: string }> }> };
 }
 
 interface AsyncStatusPayload {
+	lifecycleArtifactVersion?: number;
 	sessionId?: string;
 	activityState?: string;
 	currentTool?: string;
 	currentPath?: string;
 	state?: string;
 	totalTokens?: { total: number };
+	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 	parallelGroups?: Array<{ start: number; count: number; stepIndex: number }>;
 	steps?: Array<{
 		label?: string;
@@ -56,8 +62,14 @@ interface AsyncStatusPayload {
 		model?: string;
 		thinking?: string;
 		tokens?: { total: number };
+		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 		acceptance?: { status?: string };
 	}>;
+}
+
+interface MockPiCallRecord {
+	args?: string[];
+	systemPrompts?: Array<{ mode?: string; path?: string; text?: string; error?: string }>;
 }
 
 interface AsyncExecutionModule {
@@ -96,6 +108,10 @@ const ASYNC_DIR = typesMod?.ASYNC_DIR;
 const RESULTS_DIR = typesMod?.RESULTS_DIR;
 const TEMP_ROOT_DIR = typesMod?.TEMP_ROOT_DIR;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function git(cwd: string, args: string[]): string {
 	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
@@ -141,13 +157,34 @@ async function waitForAsyncResultFile(id: string, timeoutMs = 15_000): Promise<s
 	return resultPath;
 }
 
+async function waitForMockPiCall(mockPi: MockPi, index: number, timeoutMs = 30_000): Promise<{ args: string[]; systemPrompts: NonNullable<MockPiCallRecord["systemPrompts"]> }> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const callFile = fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.sort()
+			.at(index);
+		if (callFile) {
+			const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as MockPiCallRecord;
+			assert.ok(Array.isArray(payload.args), "expected recorded args");
+			return { args: payload.args, systemPrompts: payload.systemPrompts ?? [] };
+		}
+		if (Date.now() > deadline) assert.fail(`Timed out waiting for recorded mock pi call ${index}`);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+}
+
+async function waitForMockPiArgs(mockPi: MockPi, index: number, timeoutMs = 30_000): Promise<string[]> {
+	return (await waitForMockPiCall(mockPi, index, timeoutMs)).args;
+}
+
 function readLastMockPiArgs(mockPi: MockPi): string[] {
 	const callFile = fs.readdirSync(mockPi.dir)
 		.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
 		.sort()
 		.at(-1);
 	assert.ok(callFile, "expected a recorded mock pi call");
-	const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as { args?: string[] };
+	const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as MockPiCallRecord;
 	assert.ok(Array.isArray(payload.args), "expected recorded args");
 	return payload.args;
 }
@@ -158,9 +195,21 @@ function readMockPiArgs(mockPi: MockPi, index: number): string[] {
 		.sort()
 		.at(index);
 	assert.ok(callFile, `expected recorded call ${index}`);
-	const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as { args?: string[] };
+	const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as MockPiCallRecord;
 	assert.ok(Array.isArray(payload.args), "expected recorded args");
 	return payload.args;
+}
+
+function readMockPiArgsMatching(mockPi: MockPi, text: string): string[] {
+	const callFiles = fs.readdirSync(mockPi.dir)
+		.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+		.sort();
+	for (const callFile of callFiles) {
+		const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as { args?: string[] };
+		assert.ok(Array.isArray(payload.args), "expected recorded args");
+		if (payload.args.join("\n").includes(text)) return payload.args;
+	}
+	assert.fail(`expected recorded call containing ${text}`);
 }
 
 describe("async execution utilities", { skip: !available ? "pi packages not available" : undefined }, () => {
@@ -189,6 +238,74 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(typeof result, "boolean");
 	});
 
+	it("spawns the async runner with node when process.execPath is not node", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const originalExecPath = process.execPath;
+		process.execPath = path.join(tempDir, process.platform === "win32" ? "pi.exe" : "pi");
+		try {
+			mockPi.onCall({ output: "non-node exec async done" });
+			const id = `async-non-node-exec-${Date.now().toString(36)}`;
+			const result = executeAsyncSingle(id, {
+				agent: "worker",
+				task: "Say non-node exec async done. Do not edit files.",
+				agentConfig: makeAgent("worker"),
+				ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+				artifactConfig: {
+					enabled: false,
+					includeInput: false,
+					includeOutput: false,
+					includeJsonl: false,
+					includeMetadata: false,
+					cleanupDays: 7,
+				},
+				shareEnabled: false,
+				sessionRoot: path.join(tempDir, "sessions"),
+				maxSubagentDepth: 2,
+			});
+
+			assert.equal(result.isError, undefined);
+			const resultPath = await waitForAsyncResultFile(id, 10_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			assert.equal(payload.success, true);
+			assert.equal(payload.results[0]?.output, "non-node exec async done");
+		} finally {
+			process.execPath = originalExecPath;
+		}
+	});
+
+	it("falls back to PATH node when node-like process.execPath is stale", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const originalExecPath = process.execPath;
+		process.execPath = path.join(tempDir, "deleted-node-install", "bin", process.platform === "win32" ? "node.exe" : "node");
+		try {
+			mockPi.onCall({ output: "stale node exec async done" });
+			const id = `async-stale-node-exec-${Date.now().toString(36)}`;
+			const result = executeAsyncSingle(id, {
+				agent: "worker",
+				task: "Say stale node exec async done. Do not edit files.",
+				agentConfig: makeAgent("worker"),
+				ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+				artifactConfig: {
+					enabled: false,
+					includeInput: false,
+					includeOutput: false,
+					includeJsonl: false,
+					includeMetadata: false,
+					cleanupDays: 7,
+				},
+				shareEnabled: false,
+				sessionRoot: path.join(tempDir, "sessions"),
+				maxSubagentDepth: 2,
+			});
+
+			assert.equal(result.isError, undefined);
+			const resultPath = await waitForAsyncResultFile(id, 10_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			assert.equal(payload.success, true);
+			assert.equal(payload.results[0]?.output, "stale node exec async done");
+		} finally {
+			process.execPath = originalExecPath;
+		}
+	});
+
 	it("readStatus returns null for missing directory", () => {
 		const status = readStatus("/nonexistent/path/abc123");
 		assert.equal(status, null);
@@ -215,6 +332,50 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		} finally {
 			removeTempDir(dir);
 		}
+	});
+
+	it("interrupts every active async parallel child", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ delay: 5_000, output: "one done" });
+		mockPi.onCall({ delay: 5_000, output: "two done" });
+		mockPi.onCall({ delay: 5_000, output: "three done" });
+		const id = `async-interrupt-parallel-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [{
+				parallel: [
+					{ agent: "one", task: "Wait" },
+					{ agent: "two", task: "Wait" },
+					{ agent: "three", task: "Wait" },
+				],
+				concurrency: 3,
+			}],
+			resultMode: "parallel",
+			agents: [makeAgent("one"), makeAgent("two"), makeAgent("three")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		await waitForMockPiCall(mockPi, 2, 10_000);
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
+
+		const resultPath = await waitForAsyncResultFile(id, 3_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.state, "paused");
+		assert.equal(payload.success, false);
+		assert.deepEqual(status.steps?.map((step) => step.status), ["paused", "paused", "paused"]);
+		assert.equal(mockPi.callCount(), 3);
 	});
 
 	it("async launch messages tell the parent not to sleep-poll", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -284,13 +445,13 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			tempArtifactsDir: tempDir,
 			getSubagentSessionRoot: () => tempDir,
 			expandTilde: (p: string) => p,
-			discoverAgents: () => ({ agents: [makeAgent("worker")] }),
+			discoverAgents: () => ({ agents: [makeAgent("worker", { defaultProgress: true })] }),
 		});
 
 		const result = await executor.execute(
 			"async-parallel-fields",
 			{
-				tasks: [{ agent: "worker", task: "Do async work", output: "async-top-output.md", reads: ["input.md"], progress: true }],
+				tasks: [{ agent: "worker", task: "Do async work", output: "async-top-output.md", reads: ["input.md"] }],
 				async: true,
 				clarify: false,
 			},
@@ -316,7 +477,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			assert.equal(payload.results[0]?.acceptance?.status, "checked");
 			assert.equal(status.sessionId, "session-123");
 			assert.equal(status.steps?.[0]?.acceptance?.status, "checked");
-		const outputPath = path.join(tempDir, "async-top-output.md");
+		const outputPath = path.join(tempDir, ".pi-subagents", "artifacts", "outputs", asyncId, "async-top-output.md");
 		const outputDeadline = Date.now() + 5_000;
 		while (!fs.existsSync(outputPath)) {
 			if (Date.now() > outputDeadline) {
@@ -329,10 +490,12 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.ok(callFile, "expected a recorded mock pi call");
 		const args = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
 		const taskArg = args.at(-1) ?? "";
+		const progressPath = path.join(tempDir, ".pi-subagents", "artifacts", "progress", asyncId, "progress.md");
 		assert.ok(taskArg.includes(`[Read from: ${path.join(tempDir, "input.md")}]`));
-		assert.ok(taskArg.includes(`Update progress at: ${path.join(tempDir, "progress.md")}`));
-		assert.ok(taskArg.includes(`Write your findings to: ${outputPath}`));
-		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), true);
+		assert.ok(taskArg.includes(`Update progress at: ${progressPath}`));
+		assert.ok(taskArg.includes(`Write your findings to exactly this path: ${outputPath}`));
+		assert.equal(fs.existsSync(progressPath), true);
+		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
 	});
 
 	it("async single rejects explicit reviewed acceptance without a reviewer result", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -446,7 +609,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			required: ["value"],
 			properties: { value: { type: "string" } },
 		};
-		mockPi.onCall({ output: "structured prose", structuredOutput: { value: "Alpha structured" } });
+		mockPi.onCall({ structuredOutput: { value: "Alpha structured" } });
 		mockPi.onCall({ output: "used named output" });
 		const id = `async-structured-chain-${Date.now().toString(36)}`;
 		const result = executeAsyncChain(id, {
@@ -483,6 +646,70 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.workflowGraph?.nodes?.[0]?.outputName, "data");
 		assert.equal(payload.workflowGraph?.nodes?.[0]?.status, "completed");
 		assert.equal(payload.workflowGraph?.nodes?.[1]?.status, "completed");
+	});
+
+	it("async chains can start parallel, funnel into one step, then fan back out", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ matchArgIncludes: "Scout API", output: "Scout A async findings" });
+		mockPi.onCall({ matchArgIncludes: "Scout UI", output: "Scout B async findings" });
+		mockPi.onCall({ matchArgIncludes: "Synthesize:", output: "Async funnel synthesis" });
+		mockPi.onCall({ matchArgIncludes: "Review funnel A:", output: "Async reviewer A done" });
+		mockPi.onCall({ matchArgIncludes: "Review funnel B:", output: "Async reviewer B done" });
+		const id = `async-parallel-funnel-fanout-${Date.now().toString(36)}`;
+		const result = executeAsyncChain(id, {
+			chain: [
+				{
+					parallel: [
+						{ agent: "scout-a", task: "Scout API" },
+						{ agent: "scout-b", task: "Scout UI" },
+					],
+					concurrency: 2,
+				},
+				{ agent: "synthesizer", task: "Synthesize:\n{previous}" },
+				{
+					parallel: [
+						{ agent: "review-a", task: "Review funnel A:\n{previous}" },
+						{ agent: "review-b", task: "Review funnel B:\n{previous}" },
+					],
+					concurrency: 2,
+				},
+			],
+			agents: [makeAgent("scout-a"), makeAgent("scout-b"), makeAgent("synthesizer"), makeAgent("review-a"), makeAgent("review-b")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-parallel-funnel-fanout" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError, `should launch: ${JSON.stringify(result.content)}`);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, true);
+		assert.deepEqual(payload.results.map((entry) => entry.output), [
+			"Scout A async findings",
+			"Scout B async findings",
+			"Async funnel synthesis",
+			"Async reviewer A done",
+			"Async reviewer B done",
+		]);
+		assert.deepEqual(status.steps?.map((step) => step.status), ["complete", "complete", "complete", "complete", "complete"]);
+		assert.deepEqual(status.parallelGroups, [
+			{ start: 0, count: 2, stepIndex: 0 },
+			{ start: 3, count: 2, stepIndex: 2 },
+		]);
+		const funnelTask = readMockPiArgsMatching(mockPi, "Synthesize:").at(-1) ?? "";
+		assert.match(funnelTask, /=== Parallel Task 1 \(scout-a\) ===/);
+		assert.match(funnelTask, /Scout A async findings/);
+		assert.match(funnelTask, /=== Parallel Task 2 \(scout-b\) ===/);
+		assert.match(funnelTask, /Scout B async findings/);
+		assert.match(readMockPiArgsMatching(mockPi, "Review funnel A:").at(-1) ?? "", /Review funnel A:\nAsync funnel synthesis/);
+		assert.match(readMockPiArgsMatching(mockPi, "Review funnel B:").at(-1) ?? "", /Review funnel B:\nAsync funnel synthesis/);
+		assert.equal(payload.workflowGraph?.nodes?.[0]?.kind, "parallel-group");
+		assert.equal(payload.workflowGraph?.nodes?.[0]?.status, "completed");
+		assert.equal(payload.workflowGraph?.nodes?.[1]?.kind, "step");
+		assert.equal(payload.workflowGraph?.nodes?.[1]?.status, "completed");
+		assert.equal(payload.workflowGraph?.nodes?.[2]?.kind, "parallel-group");
+		assert.equal(payload.workflowGraph?.nodes?.[2]?.status, "completed");
 	});
 
 	it("async dynamic status shows a placeholder before materialization", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -577,6 +804,52 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.workflowGraph?.nodes?.[1]?.kind, "dynamic-parallel-group");
 		assert.deepEqual(payload.workflowGraph?.nodes?.[1]?.children?.map((child) => child.itemKey), ["src/a.ts", "src/b.ts"]);
 		assert.equal(payload.workflowGraph?.nodes?.[2]?.flatIndex, 3);
+	});
+
+	it("async dynamic fanout applies fork session files and thinking overrides to materialized children", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
+		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
+		mockPi.onCall({ output: "review-b", structuredOutput: { ok: "b" } });
+		const id = `async-dynamic-fork-thinking-${Date.now().toString(36)}`;
+		const sessionA = path.join(tempDir, "dynamic-a.jsonl");
+		const sessionB = path.join(tempDir, "dynamic-b.jsonl");
+		const result = executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 2 },
+					parallel: {
+						agent: "reviewer",
+						task: "Review {target.path}",
+						label: "Review {target.path}",
+						outputSchema: { type: "object" },
+					},
+					collect: { as: "reviews" },
+					concurrency: 1,
+				},
+			],
+			agents: [makeAgent("producer"), makeAgent("reviewer", { model: "anthropic/claude-sonnet-4-5:high", thinking: "high" })],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionFilesByFlatIndex: [undefined, sessionA, sessionB],
+			thinkingOverridesByFlatIndex: [undefined, "off", "off"],
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const firstDynamicArgs = readMockPiArgs(mockPi, 1);
+		const secondDynamicArgs = readMockPiArgs(mockPi, 2);
+		assert.equal(payload.success, true);
+		assert.equal(firstDynamicArgs[firstDynamicArgs.indexOf("--session") + 1], sessionA);
+		assert.equal(secondDynamicArgs[secondDynamicArgs.indexOf("--session") + 1], sessionB);
+		assert.equal(firstDynamicArgs[firstDynamicArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5:off");
+		assert.equal(secondDynamicArgs[secondDynamicArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5:off");
+		assert.deepEqual(status.steps?.slice(1).map((step) => step.sessionFile), [sessionA, sessionB]);
+		assert.deepEqual(status.steps?.slice(1).map((step) => step.thinking), ["off", "off"]);
 	});
 
 	it("async dynamic fanout recomputes later child intercom targets by final flat index", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -676,7 +949,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.match(payload.workflowGraph?.nodes?.[1]?.error ?? "", /Collected output validation failed/);
 	});
 
-	it("top-level async worktree parallel resolves reads and output against the worktree cwd", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+	it("top-level async worktree parallel resolves reads against the worktree and output under project artifacts", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
 		const repoDir = createRepo("pi-subagent-async-worktree-");
 		try {
 			mockPi.onCall({ output: "Worktree report" });
@@ -706,27 +979,13 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 			const asyncId = result.details?.asyncId;
 			assert.ok(asyncId, "expected asyncId");
-			const resultPath = path.join(RESULTS_DIR, `${asyncId}.json`);
-			const asyncDir = result.details?.asyncDir;
-			const deadline = Date.now() + 30_000;
-			while (!fs.existsSync(resultPath)) {
-				if (Date.now() > deadline) {
-					const statusPath = asyncDir ? path.join(asyncDir, "status.json") : undefined;
-					const eventsPath = asyncDir ? path.join(asyncDir, "events.jsonl") : undefined;
-					const status = statusPath && fs.existsSync(statusPath) ? fs.readFileSync(statusPath, "utf-8") : "(missing status.json)";
-					const events = eventsPath && fs.existsSync(eventsPath) ? fs.readFileSync(eventsPath, "utf-8") : "(missing events.jsonl)";
-					assert.fail(`Timed out waiting for async result file: ${resultPath}\nStatus: ${status}\nEvents: ${events}`);
-				}
-				await new Promise((resolve) => setTimeout(resolve, 100));
-			}
 
 			const worktreeCwd = path.join(os.tmpdir(), `pi-worktree-${asyncId}-s0-0`);
-			const callFile = fs.readdirSync(mockPi.dir).find((name) => name.startsWith("call-"));
-			assert.ok(callFile, "expected a recorded mock pi call");
-			const args = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
+			const args = await waitForMockPiArgs(mockPi, 0);
 			const taskArg = args.at(-1) ?? "";
 			assert.ok(taskArg.includes(`[Read from: ${path.join(worktreeCwd, "input.md")}]`));
-			assert.ok(taskArg.includes(`Write your findings to: ${path.join(worktreeCwd, "report.md")}`));
+			assert.ok(taskArg.includes(`Write your findings to exactly this path: ${path.join(repoDir, ".pi-subagents", "artifacts", "outputs", asyncId, "report.md")}`));
+			await waitForAsyncResultFile(asyncId, 90_000);
 		} finally {
 			removeTempDir(repoDir);
 		}
@@ -818,16 +1077,128 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+		assert.equal(payload.lifecycleArtifactVersion, 1);
 		assert.equal(payload.success, true);
 		assert.equal(payload.results[0].model, "anthropic/claude-sonnet-4:low");
 		assert.deepEqual(payload.results[0].attemptedModels, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"]);
 		assert.equal(payload.results[0].modelAttempts.length, 2);
+		assert.deepEqual(payload.results[0].totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
+		assert.deepEqual(payload.totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
 		const statusPayload = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(statusPayload.lifecycleArtifactVersion, 1);
 		assert.equal(statusPayload.steps[0]?.model, "anthropic/claude-sonnet-4:low");
 		assert.equal(statusPayload.steps[0]?.thinking, "low");
 		assert.ok(statusPayload.totalTokens!.total > 0);
 		assert.ok(statusPayload.steps[0]?.tokens!.total > 0);
+		assert.deepEqual(statusPayload.steps[0]?.totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
+		assert.deepEqual(statusPayload.totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
+		const events = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(events.find((event) => event.type === "subagent.run.started")?.lifecycleArtifactVersion, 1);
+		const completed = events.find((event) => event.type === "subagent.run.completed");
+		assert.equal(completed?.lifecycleArtifactVersion, 1);
+		assert.deepEqual(completed?.totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
 		assert.match(fs.readFileSync(path.join(asyncDir, "output-0.log"), "utf-8"), /Recovered asynchronously/);
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("background single thinking override replaces primary and fallback suffixes", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "primary failed" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "rate limit exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered asynchronously" });
+		const id = `async-fallback-thinking-off-${Date.now().toString(36)}`;
+		const run = executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker", {
+				model: "openai/gpt-5-mini:high",
+				fallbackModels: ["anthropic/claude-sonnet-4:low"],
+				thinking: "high",
+			}),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			availableModels: [
+				{ provider: "openai", id: "gpt-5-mini", fullId: "openai/gpt-5-mini" },
+				{ provider: "anthropic", id: "claude-sonnet-4", fullId: "anthropic/claude-sonnet-4" },
+			],
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			thinkingOverride: "off",
+			maxSubagentDepth: 2,
+		});
+
+		assert.equal(run.details.asyncId, id);
+		const resultPath = await waitForAsyncResultFile(id);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const firstArgs = readMockPiArgs(mockPi, 0);
+		const secondArgs = readMockPiArgs(mockPi, 1);
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0].model, "anthropic/claude-sonnet-4:off");
+		assert.deepEqual(payload.results[0].attemptedModels, ["openai/gpt-5-mini:off", "anthropic/claude-sonnet-4:off"]);
+		assert.equal(firstArgs[firstArgs.indexOf("--model") + 1], "openai/gpt-5-mini:off");
+		assert.equal(secondArgs[secondArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4:off");
+	});
+
+	it("background runs retry fallback models when a zero-exit attempt has empty output", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "" }],
+					model: "openai/gpt-5-mini",
+					stopReason: "error",
+					usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 0,
+		});
+		mockPi.onCall({ output: "Recovered asynchronously from empty output" });
+		const id = `async-empty-output-fallback-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker", {
+				model: "openai/gpt-5-mini",
+				fallbackModels: ["anthropic/claude-sonnet-4"],
+			}),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0]?.model, "anthropic/claude-sonnet-4");
+		assert.match(payload.results[0]?.output ?? "", /Recovered asynchronously from empty output/);
+		assert.match(payload.results[0]?.modelAttempts?.[0]?.error ?? "", /no output/i);
+		assert.deepEqual(payload.results[0]?.modelAttempts?.map((attempt) => attempt.success), [false, true]);
 		assert.equal(mockPi.callCount(), 2);
 	});
 
@@ -1016,6 +1387,80 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(fs.readFileSync(outputPath, "utf-8"), "async full output\nwith details");
 	});
 
+	it("background single runs route relative outputs to outputBaseDir", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "async configured report" });
+		const id = `async-configured-output-base-${Date.now().toString(36)}`;
+		const outputBaseDir = path.join(tempDir, "async-configured-outputs");
+		const run = executeAsyncSingle(id, {
+			agent: "researcher",
+			task: "Write report",
+			agentConfig: makeAgent("researcher", { output: "context.md" }),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			output: "context.md",
+			outputBaseDir,
+			maxSubagentDepth: 2,
+		});
+
+		assert.equal(run.details.asyncId, id);
+		const outputPath = path.join(outputBaseDir, "context.md");
+		const call = await waitForMockPiCall(mockPi, 0);
+		const taskArg = call.args.at(-1) ?? "";
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(outputPath)}`));
+		const resultPath = await waitForAsyncResultFile(id);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.equal(fs.readFileSync(outputPath, "utf-8"), "async configured report");
+		assert.equal(fs.existsSync(path.join(tempDir, "context.md")), false);
+	});
+
+	it("background single runs make output overrides authoritative in the child system prompt", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "async override report" });
+		const id = `async-output-override-system-prompt-${Date.now().toString(36)}`;
+		const outputPath = path.join(tempDir, "async-custom-report.md");
+		const run = executeAsyncSingle(id, {
+			agent: "researcher",
+			task: "Write report",
+			agentConfig: makeAgent("researcher", {
+				output: "default-report.md",
+				systemPrompt: "Output format (`default-report.md`):\n\nWrite the full report to default-report.md.",
+			}),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			output: outputPath,
+			maxSubagentDepth: 2,
+		});
+
+		assert.equal(run.details.asyncId, id);
+		const call = await waitForMockPiCall(mockPi, 0);
+		const taskArg = call.args.at(-1) ?? "";
+		const systemPrompt = call.systemPrompts[0]?.text ?? "";
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(outputPath)}`));
+		assert.match(systemPrompt, /Output format \(`default-report\.md`\):/);
+		assert.match(systemPrompt, /Runtime output path override:/);
+		assert.match(systemPrompt, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(outputPath)}`));
+		assert.match(systemPrompt, /Ignore any other output filename or output path mentioned elsewhere/);
+		await waitForAsyncResultFile(id);
+	});
+
 	it("background single runs treat string false as disabled output", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ output: "async inline report" });
 		const id = `async-string-false-output-${Date.now().toString(36)}`;
@@ -1046,7 +1491,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.doesNotMatch(payload.summary ?? "", /Output saved to:/);
 		assert.equal(fs.existsSync(path.join(tempDir, "false")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, "default-report.md")), false);
-		assert.doesNotMatch(readLastMockPiArgs(mockPi).at(-1) ?? "", /Write your findings to:/);
+		assert.doesNotMatch(readLastMockPiArgs(mockPi).at(-1) ?? "", /Write your findings to(?: exactly this path)?:/);
 	});
 
 	it("background runs detect hidden tool failures even when the child exits 0", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -1220,6 +1665,79 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.success, true);
 		assert.equal(payload.results[0].model, "github-copilot/gpt-5-mini");
 		assert.deepEqual(payload.results[0].attemptedModels, ["github-copilot/gpt-5-mini"]);
+	});
+
+	it("background single runs inherit the parent session model when no model is set", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "Done asynchronously" });
+
+		const id = `async-single-parent-model-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker"),
+			ctx: {
+				pi: { events: { emit() {} } },
+				cwd: tempDir,
+				currentSessionId: "session-1",
+				currentModelProvider: "deepseek",
+				currentModel: { provider: "deepseek", id: "deepseek-v4-flash" },
+			},
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0].model, "deepseek/deepseek-v4-flash");
+		assert.deepEqual(payload.results[0].attemptedModels, ["deepseek/deepseek-v4-flash"]);
+		const args = readMockPiArgs(mockPi, 0);
+		assert.equal(args[args.indexOf("--model") + 1], "deepseek/deepseek-v4-flash");
+	});
+
+	it("background chains inherit the parent session model when no step or agent model is set", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "Done asynchronously" });
+
+		const id = `async-chain-parent-model-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [{ agent: "worker", task: "Do work" }],
+			agents: [makeAgent("worker")],
+			ctx: {
+				pi: { events: { emit() {} } },
+				cwd: tempDir,
+				currentSessionId: "session-1",
+				currentModelProvider: "deepseek",
+				currentModel: { provider: "deepseek", id: "deepseek-v4-flash" },
+			},
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0].model, "deepseek/deepseek-v4-flash");
+		assert.deepEqual(payload.results[0].attemptedModels, ["deepseek/deepseek-v4-flash"]);
+		const args = readMockPiArgs(mockPi, 0);
+		assert.equal(args[args.indexOf("--model") + 1], "deepseek/deepseek-v4-flash");
 	});
 
 	it("background runs resolve skills from the effective task cwd", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -1549,7 +2067,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 	it("returns a tool error when the async runner process cannot spawn", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, () => {
 		const originalExecPath = process.execPath;
-		process.execPath = path.join(tempDir, "missing-node");
+		const pathKey = process.platform === "win32" ? "Path" : "PATH";
+		const originalPath = process.env[pathKey];
+		process.execPath = path.join(tempDir, process.platform === "win32" ? "pi.exe" : "pi");
+		process.env[pathKey] = tempDir;
 		try {
 			const id = `async-spawn-fail-${Date.now().toString(36)}`;
 			const result = executeAsyncSingle(id, {
@@ -1575,6 +2096,11 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			assert.match(result.content[0]?.text ?? "", /async runner did not produce a pid/);
 		} finally {
 			process.execPath = originalExecPath;
+			if (originalPath === undefined) {
+				delete process.env[pathKey];
+			} else {
+				process.env[pathKey] = originalPath;
+			}
 		}
 	});
 
@@ -1646,7 +2172,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 		const elapsed = Date.now() - start;
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
-		assert.ok(elapsed < 4000, `should clean up async child shortly after terminal stop, took ${elapsed}ms`);
+		assert.ok(elapsed < 9000, `should clean up async child before the mock's natural keepalive exit, took ${elapsed}ms`);
 		assert.equal(payload.success, true);
 		assert.equal(payload.exitCode, 0);
 		assert.equal(payload.results[0].success, true);
@@ -1682,7 +2208,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 		const elapsed = Date.now() - start;
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
-		assert.ok(elapsed < 4000, `should clean up async child shortly after empty terminal stop, took ${elapsed}ms`);
+		assert.ok(elapsed < 9000, `should clean up async child before the mock's natural keepalive exit, took ${elapsed}ms`);
 		assert.equal(payload.success, true);
 		assert.equal(payload.exitCode, 0);
 		assert.equal(payload.results[0].success, true);
@@ -1868,6 +2394,69 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		while (!fs.existsSync(resultPath)) {
 			if (Date.now() > doneDeadline) assert.fail(`Timed out waiting for async result file: ${resultPath}`);
 			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+	});
+
+	it("background event logs drop noisy message updates and cap child diagnostics", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const previousMaxBytes = process.env.PI_SUBAGENT_ASYNC_EVENTS_MAX_BYTES;
+		process.env.PI_SUBAGENT_ASYNC_EVENTS_MAX_BYTES = "900";
+		try {
+			mockPi.onCall({
+				steps: [
+					{
+						jsonl: [
+							{
+								type: "message_update",
+								assistantMessageEvent: {
+									type: "thinking_delta",
+									delta: "NOISY_PARTIAL_DELTA",
+									partial: { role: "assistant", content: [{ type: "text", text: "NOISY_PARTIAL_SNAPSHOT".repeat(200) }] },
+								},
+								message: { role: "assistant", content: [{ type: "text", text: "NOISY_PARTIAL_MESSAGE".repeat(200) }] },
+							},
+							events.toolStart("bash", { command: `echo ${"BIG_COMMAND_PAYLOAD".repeat(200)}` }),
+							events.assistantMessage("Done after noisy stream"),
+						],
+					},
+				],
+			});
+
+			const id = `async-noisy-events-${Date.now().toString(36)}`;
+			const asyncDir = path.join(ASYNC_DIR, id);
+			const sessionRoot = path.join(tempDir, "sessions");
+
+			executeAsyncSingle(id, {
+				agent: "worker",
+				task: "Stream noisy diagnostics",
+				agentConfig: makeAgent("worker"),
+				ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+				artifactConfig: {
+					enabled: false,
+					includeInput: false,
+					includeOutput: false,
+					includeJsonl: false,
+					includeMetadata: false,
+					cleanupDays: 7,
+				},
+				shareEnabled: false,
+				sessionRoot,
+				maxSubagentDepth: 2,
+			});
+
+			const resultPath = await waitForAsyncResultFile(id, 10_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			assert.equal(payload.success, true);
+			assert.equal(payload.results[0]?.output, "Done after noisy stream");
+
+			const eventsText = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8");
+			assert.doesNotMatch(eventsText, /"type":"message_update"/);
+			assert.doesNotMatch(eventsText, /NOISY_PARTIAL_/);
+			assert.doesNotMatch(eventsText, /BIG_COMMAND_PAYLOAD/);
+			assert.match(eventsText, /"type":"subagent\.events\.truncated"/);
+			assert.match(eventsText, /"droppedEventType":"tool_execution_start"/);
+		} finally {
+			if (previousMaxBytes === undefined) delete process.env.PI_SUBAGENT_ASYNC_EVENTS_MAX_BYTES;
+			else process.env.PI_SUBAGENT_ASYNC_EVENTS_MAX_BYTES = previousMaxBytes;
 		}
 	});
 

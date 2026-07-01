@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ChainOutputValidationError, validateChainOutputBindings } from "../../src/runs/shared/chain-outputs.ts";
+import { ChainOutputValidationError, validateChainOutputBindings, validateChainOutputBindingsWithContext } from "../../src/runs/shared/chain-outputs.ts";
 import {
 	DynamicFanoutError,
 	collectDynamicResults,
 	materializeDynamicParallelStep,
 	resolveJsonPointer,
 	validateDynamicCollection,
+	validateDynamicStepShape,
 } from "../../src/runs/shared/dynamic-fanout.ts";
 import type { ChainStep } from "../../src/shared/settings.ts";
 import type { ChainOutputMap, SingleResult } from "../../src/shared/types.ts";
@@ -122,6 +123,22 @@ describe("dynamic fanout helpers", () => {
 		}
 	});
 
+	it("accepts a runner-injected parentSessionId on the parallel template but keeps it out of user-facing validation", () => {
+		// Regression: the async runner threads parentSessionId onto the dynamic parallel
+		// template for permission-system forwarding. It must pass runner-internal validation
+		// (allowRunnerFields) without leaking into the user-facing dynamic field whitelist.
+		const runnerStep = {
+			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },
+			parallel: { agent: "reviewer", task: "Review {item.path}", parentSessionId: "session-parent" },
+			collect: { as: "reviews" },
+		} as unknown as Parameters<typeof validateDynamicStepShape>[0];
+		assert.doesNotThrow(() => validateDynamicStepShape(runnerStep, 1, { allowRunnerFields: true }));
+		assert.throws(
+			() => validateDynamicStepShape(runnerStep, 1),
+			(error: unknown) => error instanceof DynamicFanoutError && /parentSessionId/.test(error.message),
+		);
+	});
+
 	it("validates source ordering and collect name collisions", () => {
 		const chain: ChainStep[] = [
 			{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
@@ -136,6 +153,31 @@ describe("dynamic fanout helpers", () => {
 			() => validateChainOutputBindings([chain[1]!]),
 			/unknown output 'targets'/,
 		);
+	});
+
+	it("validates appended steps against prior and reserved output names", () => {
+		assert.doesNotThrow(() => validateChainOutputBindingsWithContext([
+			{ agent: "worker", task: "Use {outputs.targets}", as: "summary" },
+		], {}, { priorOutputNames: ["targets"], startStepIndex: 2 }));
+		assert.throws(
+			() => validateChainOutputBindingsWithContext([
+				{ agent: "worker", task: "Use {outputs.missing}" },
+			], {}, { priorOutputNames: ["targets"], startStepIndex: 2 }),
+			/Unknown chain output reference '\{outputs\.missing\}' at step 3/,
+		);
+		assert.throws(
+			() => validateChainOutputBindingsWithContext([
+				{ agent: "worker", task: "Use {previous}", as: "targets" },
+			], {}, { priorOutputNames: ["targets"], startStepIndex: 2 }),
+			/Duplicate chain output name 'targets'/,
+		);
+		assert.doesNotThrow(() => validateChainOutputBindingsWithContext([
+			{
+				expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },
+				parallel: { agent: "reviewer", task: "Review {item.path}" },
+				collect: { as: "reviews" },
+			},
+		], {}, { priorOutputNames: ["targets"], startStepIndex: 2 }));
 	});
 
 	it("collects ordered child result records and validates aggregate schema", () => {
@@ -154,9 +196,11 @@ describe("dynamic fanout helpers", () => {
 			finalOutput: "ok",
 			structuredOutput,
 		});
-		const collected = collectDynamicResults(step, materialized.items, [result("reviewer", { ok: "a" }), result("reviewer", { ok: "b" })]);
+		const timedOut = { ...result("reviewer", { ok: "b" }), exitCode: 1, error: "Subagent timed out after 300ms.", timedOut: true };
+		const collected = collectDynamicResults(step, materialized.items, [result("reviewer", { ok: "a" }), timedOut]);
 		assert.deepEqual(collected.map((item) => item.key), ["src/a.ts", "src/b.ts"]);
 		assert.deepEqual(collected.map((item) => item.structured), [{ ok: "a" }, { ok: "b" }]);
+		assert.equal(collected[1]?.timedOut, true);
 		assert.doesNotThrow(() => validateDynamicCollection({ type: "array", minItems: 2 }, collected));
 		assert.throws(() => validateDynamicCollection({ type: "object" }, collected), DynamicFanoutError);
 	});

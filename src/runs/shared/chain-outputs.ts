@@ -8,6 +8,11 @@ const SAFE_OUTPUT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export class ChainOutputValidationError extends Error {}
 
+export interface ChainOutputValidationContext {
+	priorOutputNames?: Iterable<string>;
+	startStepIndex?: number;
+}
+
 function outputNamesForStep(step: ChainStep): string[] {
 	if (isParallelStep(step)) return step.parallel.map((task) => task.as).filter((name): name is string => Boolean(name));
 	if (isDynamicParallelStep(step)) return [step.collect.as];
@@ -22,27 +27,37 @@ function taskTemplatesForStep(step: ChainStep): string[] {
 }
 
 export function validateChainOutputBindings(steps: ChainStep[], dynamicFanoutConfig: DynamicFanoutConfig = {}): void {
-	const available = new Set<string>();
-	const seen = new Set<string>();
+	validateChainOutputBindingsWithContext(steps, dynamicFanoutConfig);
+}
+
+export function validateChainOutputBindingsWithContext(
+	steps: ChainStep[],
+	dynamicFanoutConfig: DynamicFanoutConfig = {},
+	context: ChainOutputValidationContext = {},
+): void {
+	const priorOutputNames = [...(context.priorOutputNames ?? [])];
+	const available = new Set<string>(priorOutputNames);
+	const seen = new Set<string>(priorOutputNames);
 	for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
+		const displayStepIndex = (context.startStepIndex ?? 0) + stepIndex + 1;
 		const step = steps[stepIndex]!;
 		if (hasDynamicFanoutFields(step)) {
 			if (!isDynamicParallelStep(step)) {
-				throw new ChainOutputValidationError(`Dynamic chain step ${stepIndex + 1} requires expand, a single parallel template object, and collect; dynamic expand/collect cannot be mixed with static parallel arrays.`);
+				throw new ChainOutputValidationError(`Dynamic chain step ${displayStepIndex} requires expand, a single parallel template object, and collect; dynamic expand/collect cannot be mixed with static parallel arrays.`);
 			}
 			try {
-				validateDynamicStepShape(step, stepIndex, dynamicFanoutConfig);
+				validateDynamicStepShape(step, displayStepIndex - 1, dynamicFanoutConfig);
 			} catch (error) {
 				if (error instanceof DynamicFanoutError) throw new ChainOutputValidationError(error.message);
 				throw error;
 			}
 			if (!available.has(step.expand.from.output)) {
-				throw new ChainOutputValidationError(`Dynamic chain step ${stepIndex + 1} references unknown output '${step.expand.from.output}'. Named outputs are only available after producing step/group completes.`);
+				throw new ChainOutputValidationError(`Dynamic chain step ${displayStepIndex} references unknown output '${step.expand.from.output}'. Named outputs are only available after producing step/group completes.`);
 			}
 		}
 		for (const name of outputNamesForStep(step)) {
 			if (!SAFE_OUTPUT_NAME_PATTERN.test(name)) {
-				throw new ChainOutputValidationError(`Invalid chain output name '${name}' at step ${stepIndex + 1}. Use /^[A-Za-z_][A-Za-z0-9_]*$/.`);
+				throw new ChainOutputValidationError(`Invalid chain output name '${name}' at step ${displayStepIndex}. Use /^[A-Za-z_][A-Za-z0-9_]*$/.`);
 			}
 			if (seen.has(name)) {
 				throw new ChainOutputValidationError(`Duplicate chain output name '${name}'. Each as name must be unique.`);
@@ -54,10 +69,10 @@ export function validateChainOutputBindings(steps: ChainStep[], dynamicFanoutCon
 				const rawReference = match[0];
 				const name = match[1]!;
 				if (!SAFE_OUTPUT_NAME_PATTERN.test(name)) {
-					throw new ChainOutputValidationError(`Invalid chain output reference '${rawReference}' at step ${stepIndex + 1}. Use {outputs.name} with /^[A-Za-z_][A-Za-z0-9_]*$/ names.`);
+					throw new ChainOutputValidationError(`Invalid chain output reference '${rawReference}' at step ${displayStepIndex}. Use {outputs.name} with /^[A-Za-z_][A-Za-z0-9_]*$/ names.`);
 				}
 				if (!available.has(name)) {
-					throw new ChainOutputValidationError(`Unknown chain output reference '${rawReference}' at step ${stepIndex + 1}. Named outputs are only available after producing step/group completes.`);
+					throw new ChainOutputValidationError(`Unknown chain output reference '${rawReference}' at step ${displayStepIndex}. Named outputs are only available after producing step/group completes.`);
 				}
 			}
 		}

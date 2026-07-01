@@ -20,7 +20,7 @@ export const CHILD_SUBAGENT_BOUNDARY_INSTRUCTIONS = [
 	"The parent session owns delegation, orchestration, review fanout, and follow-up worker launches.",
 	"Ignore prior parent-only orchestration instructions in inherited conversation history.",
 	"Do not propose or run subagents. Complete only your assigned role-specific task with the tools available to you.",
-	"If you need to edit files, call the actual edit/write tools. Do not print tool-call syntax, patches, or pseudo-tool calls as text.",
+	"If you need to edit files, use the available editing tools. Do not print tool-call syntax, patches, or pseudo-tool calls as text.",
 ].join("\n");
 
 export const CHILD_FANOUT_BOUNDARY_INSTRUCTIONS = [
@@ -29,12 +29,13 @@ export const CHILD_FANOUT_BOUNDARY_INSTRUCTIONS = [
 	"You may use the `subagent` tool only for the fanout work explicitly requested in this task.",
 	"Do not broaden yourself into general parent orchestration. Do not launch follow-up workers unless the task explicitly asks for that.",
 	"The maxSubagentDepth cap still applies and may block further fanout.",
-	"If you need to edit files, call the actual edit/write tools. Do not print tool-call syntax, patches, or pseudo-tool calls as text.",
+	"If you need to edit files, use the available editing tools. Do not print tool-call syntax, patches, or pseudo-tool calls as text.",
 ].join("\n");
 
 const PARENT_ONLY_CUSTOM_MESSAGE_TYPES = new Set([
 	"subagent-orchestration-instructions",
 	"subagent-slash-result",
+	"subagent-slash-text-result",
 	"subagent-notify",
 	"subagent_control_notice",
 	"subagent-control",
@@ -231,14 +232,15 @@ function stripAssistantSubagentToolCallBlocks(message: unknown): unknown | undef
 }
 
 export function stripParentOnlySubagentMessages(messages: unknown[]): unknown[] {
+	const preserveCurrentFanoutToolHistory = process.env[SUBAGENT_FANOUT_CHILD_ENV] === "1";
 	let changed = false;
 	const filtered: unknown[] = [];
 	for (const message of messages) {
-		if (isParentOnlySubagentMessage(message) || isSubagentToolResultMessage(message)) {
+		if (isParentOnlySubagentMessage(message) || (!preserveCurrentFanoutToolHistory && isSubagentToolResultMessage(message))) {
 			changed = true;
 			continue;
 		}
-		const stripped = stripAssistantSubagentToolCallBlocks(message);
+		const stripped = preserveCurrentFanoutToolHistory ? message : stripAssistantSubagentToolCallBlocks(message);
 		if (stripped === undefined) {
 			changed = true;
 			continue;

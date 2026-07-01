@@ -22,18 +22,34 @@ export function resolveSingleOutputPath(
 	output: string | boolean | undefined,
 	runtimeCwd: string,
 	requestedCwd?: string,
+	relativeBaseDir?: string,
 ): string | undefined {
 	if (typeof output !== "string" || !output || output === "false" || output === "true") return undefined;
 	if (path.isAbsolute(output)) return output;
+	if (relativeBaseDir) return path.resolve(relativeBaseDir, output);
 	const baseCwd = requestedCwd
 		? (path.isAbsolute(requestedCwd) ? requestedCwd : path.resolve(runtimeCwd, requestedCwd))
 		: runtimeCwd;
 	return path.resolve(baseCwd, output);
 }
 
+function formatOutputPathInstruction(outputPath: string): string {
+	return [
+		`Write your findings to exactly this path: ${outputPath}`,
+		"This path is authoritative for this run.",
+		"Ignore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+	].join("\n");
+}
+
 export function injectSingleOutputInstruction(task: string, outputPath: string | undefined): string {
 	if (!outputPath) return task;
-	return `${task}\n\n---\n**Output:** Write your findings to: ${outputPath}`;
+	return `${task}\n\n---\n**Output:**\n${formatOutputPathInstruction(outputPath)}`;
+}
+
+export function injectOutputPathSystemPrompt(systemPrompt: string, outputPath: string | undefined): string {
+	if (!outputPath) return systemPrompt;
+	const instruction = `Runtime output path override:\n${formatOutputPathInstruction(outputPath)}`;
+	return systemPrompt ? `${systemPrompt}\n\n${instruction}` : instruction;
 }
 
 function countLines(text: string): number {

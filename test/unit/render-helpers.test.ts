@@ -166,6 +166,20 @@ test("expanded chain rendering uses workflow graph spans for dynamic fanout resu
 	assert.match(text, /Step 3: writer/);
 });
 
+test("compact multi-result rendering shows total cost in the header", () => {
+	const text = componentText(renderSubagentResult({
+		content: [{ type: "text", text: "done" }],
+		details: {
+			mode: "parallel",
+			results: [result("scout", "a"), result("reviewer", "b")],
+			totalCost: { inputTokens: 30, outputTokens: 12, costUsd: 0.04 },
+		},
+	}, { expanded: false }, theme as any));
+
+	assert.match(text, /2\/2 done/);
+	assert.match(text, /in:30 out:12 \$0\.0400/);
+});
+
 test("static sequential and static parallel chain rendering keep existing labels", () => {
 	const sequential = componentText(renderSubagentResult({
 		content: [{ type: "text", text: "done" }],

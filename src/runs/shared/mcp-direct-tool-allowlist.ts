@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir } from "../../shared/utils.ts";
+import { getAgentDir, getProjectConfigDir } from "../../shared/utils.ts";
 
 const CACHE_VERSION = 1;
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -112,7 +112,7 @@ function loadMcpConfig(cwd: string): McpConfig {
 function getConfigPaths(cwd: string): string[] {
 	const piGlobalPath = path.join(getAgentDir(), "mcp.json");
 	const projectPath = path.resolve(cwd, ".mcp.json");
-	const projectPiPath = path.resolve(cwd, ".pi", "mcp.json");
+	const projectPiPath = path.resolve(getProjectConfigDir(cwd), "mcp.json");
 	const sources: string[] = [];
 	if (GENERIC_GLOBAL_CONFIG_PATH !== piGlobalPath) sources.push(GENERIC_GLOBAL_CONFIG_PATH);
 	sources.push(piGlobalPath);

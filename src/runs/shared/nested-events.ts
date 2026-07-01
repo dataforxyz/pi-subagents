@@ -184,6 +184,17 @@ function sanitizeTokenUsage(value: unknown): NestedRunSummary["totalTokens"] | u
 		: undefined;
 }
 
+function sanitizeCost(value: unknown): NestedRunSummary["totalCost"] | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const raw = value as Record<string, unknown>;
+	const inputTokens = clampNumber(raw.inputTokens);
+	const outputTokens = clampNumber(raw.outputTokens);
+	const costUsd = clampNumber(raw.costUsd);
+	return inputTokens !== undefined && outputTokens !== undefined && costUsd !== undefined
+		? { inputTokens, outputTokens, costUsd }
+		: undefined;
+}
+
 function sanitizeState(value: unknown, fallback: NestedRunState): NestedRunState {
 	return value === "queued" || value === "running" || value === "complete" || value === "failed" || value === "paused"
 		? value
@@ -225,6 +236,7 @@ export function sanitizeSummary(input: unknown, depth = 0): NestedRunSummary | u
 		? raw.steps.map((step) => sanitizeStep(step, depth + 1)).filter((step): step is NestedStepSummary => Boolean(step)).slice(0, MAX_STEPS)
 		: undefined;
 	const totalTokens = sanitizeTokenUsage(raw.totalTokens);
+	const totalCost = sanitizeCost(raw.totalCost);
 	return {
 		id: raw.id,
 		parentRunId: raw.parentRunId,
@@ -256,6 +268,7 @@ export function sanitizeSummary(input: unknown, depth = 0): NestedRunSummary | u
 		...(clampNumber(raw.turnCount) !== undefined ? { turnCount: clampNumber(raw.turnCount) } : {}),
 		...(clampNumber(raw.toolCount) !== undefined ? { toolCount: clampNumber(raw.toolCount) } : {}),
 		...(totalTokens ? { totalTokens } : {}),
+		...(totalCost ? { totalCost } : {}),
 		...(clampNumber(raw.startedAt) !== undefined ? { startedAt: clampNumber(raw.startedAt) } : {}),
 		...(clampNumber(raw.endedAt) !== undefined ? { endedAt: clampNumber(raw.endedAt) } : {}),
 		...(clampNumber(raw.lastUpdate) !== undefined ? { lastUpdate: clampNumber(raw.lastUpdate) } : {}),

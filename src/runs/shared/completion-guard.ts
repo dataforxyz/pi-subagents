@@ -84,7 +84,7 @@ function stripFrameworkInstructions(task: string): string {
 	return task
 		.split("\n")
 		.filter((line) => !/^\s*\[(?:Write to|Read from):/i.test(line))
-		.filter((line) => !/^\s*(?:Create and maintain progress at:|Update progress at:|Write your findings to:)/i.test(line))
+		.filter((line) => !/^\s*(?:Create and maintain progress at:|Update progress at:|\*\*Output:\*\*|Write your findings to(?: exactly this path)?:|This path is authoritative for this run\.|Ignore any other output filename or output path mentioned elsewhere)/i.test(line))
 		.join("\n");
 }
 

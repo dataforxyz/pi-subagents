@@ -11,6 +11,11 @@ function writeMinimalSessionFile(filePath: string, id = "session"): void {
 	fs.writeFileSync(filePath, `{"type":"session","version":1,"id":"${id}","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n`, "utf-8");
 }
 
+function writeSessionJsonl(filePath: string, entries: unknown[]): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf-8");
+}
+
 describe("resolveSubagentContext", () => {
 	it("defaults to fresh", () => {
 		assert.equal(resolveSubagentContext(undefined), "fresh");
@@ -38,6 +43,7 @@ describe("createForkContextResolver", () => {
 		});
 
 		assert.equal(resolver.sessionFileForIndex(0), undefined);
+		assert.equal(resolver.thinkingOverrideForIndex(0), undefined);
 		assert.equal(calls, 0);
 	});
 
@@ -212,7 +218,155 @@ describe("createForkContextResolver", () => {
 		}
 	});
 
-	it("fails clearly when branch extraction returns a missing child file", () => {
+	it("persists a forked session when Pi defers writing the branched file", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-deferred-child-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "nested", "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			const header = { type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile };
+			const entries = [{ type: "message", id: "leaf-abc", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "first turn" } }];
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "leaf-abc",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+					getHeader: () => header,
+					getEntries: () => entries,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.equal(fs.existsSync(childSessionFile), true);
+			assert.deepEqual(
+				fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line)),
+				[header, ...entries],
+			);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("removes signed Anthropic thinking blocks before forwarding a forked session", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-thinking-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "user-1", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "prompt" } },
+				{ type: "message", id: "assistant-1", parentId: "user-1", timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "anthropic/claude-sonnet-4", content: [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "text", text: "answer" }] } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "assistant-1",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.equal(resolver.thinkingOverrideForIndex(0), "off");
+			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.deepEqual(entries[2].message.content, [{ type: "text", text: "answer" }]);
+			assert.equal(entries[3].type, "thinking_level_change");
+			assert.equal(entries[3].thinkingLevel, "off");
+			assert.equal(entries[3].parentId, "assistant-1");
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("allows unsigned thinking blocks in forked sessions", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-unsigned-thinking-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "assistant-1", parentId: null, timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "anthropic/claude-sonnet-4", content: [{ type: "thinking", thinking: "summary without provider signature" }, { type: "text", text: "answer" }] } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "assistant-1",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.equal(resolver.thinkingOverrideForIndex(0), undefined);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("allows non-Anthropic signed thinking blocks in forked sessions", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-openai-thinking-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "assistant-1", parentId: null, timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "openai", api: "openai-responses", model: "openai/gpt-5.5", content: [{ type: "thinking", thinking: "reasoning summary", thinkingSignature: "rs_123" }, { type: "text", text: "answer" }] } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "assistant-1",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.equal(resolver.thinkingOverrideForIndex(0), undefined);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("removes redacted thinking blocks before fallback-persisting a forked session", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-redacted-thinking-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			const header = { type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile };
+			const entries = [
+				{ type: "message", id: "user-1", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "prompt" } },
+				{ type: "message", id: "assistant-1", parentId: "user-1", timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", content: [{ type: "redacted_thinking", data: "encrypted" }, { type: "text", text: "answer" }] } },
+			];
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "assistant-1",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+					getHeader: () => header,
+					getEntries: () => entries,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.equal(resolver.thinkingOverrideForIndex(0), "off");
+			const written = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.deepEqual(written[2].message.content, [{ type: "text", text: "answer" }]);
+			assert.equal(written[3].type, "thinking_level_change");
+			assert.equal(written[3].thinkingLevel, "off");
+			assert.equal(written[3].parentId, "assistant-1");
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("fails clearly when branch extraction returns a missing child file without fallback state", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-missing-child-"));
 		try {
 			const parentSessionFile = path.join(tempDir, "parent.jsonl");
@@ -229,7 +383,7 @@ describe("createForkContextResolver", () => {
 
 			assert.throws(
 				() => resolver.sessionFileForIndex(0),
-				/Failed to create forked subagent session: Session manager returned a forked session file that does not exist: .*missing-child\.jsonl/,
+				/Failed to create forked subagent session: Session manager returned a forked session file that does not exist and cannot be persisted by fallback: .*missing-child\.jsonl/,
 			);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });

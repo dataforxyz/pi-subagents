@@ -21,7 +21,7 @@ import { projectNestedRegistryForRoot, sanitizeSummary } from "../shared/nested-
 const WATCHER_RESTART_DELAY_MS = 3000;
 const POLL_INTERVAL_MS = 3000;
 
-type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "unlinkSync" | "readdirSync" | "mkdirSync" | "watch">;
+type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "unlinkSync" | "readdirSync" | "mkdirSync" | "realpathSync" | "watch">;
 
 type ResultWatcherTimers = {
 	setTimeout: typeof setTimeout;
@@ -89,6 +89,14 @@ function isNotFoundError(error: unknown): boolean {
 function shouldFallBackToPolling(error: unknown): boolean {
 	const code = getErrorCode(error);
 	return code === "EMFILE" || code === "ENOSPC";
+}
+
+function resolveNativeWatchDir(fsApi: ResultWatcherFs, resultsDir: string): string {
+	try {
+		return fsApi.realpathSync.native(resultsDir);
+	} catch {
+		return resultsDir;
+	}
 }
 
 export function createResultWatcher(
@@ -266,7 +274,8 @@ export function createResultWatcher(
 			state.watcherRestartTimer = null;
 		}
 		try {
-			state.watcher = fsApi.watch(resultsDir, (ev, file) => {
+			const watchDir = resolveNativeWatchDir(fsApi, resultsDir);
+			state.watcher = fsApi.watch(watchDir, (ev, file) => {
 				if (ev !== "rename" || !file) return;
 				const fileName = file.toString();
 				if (!fileName.endsWith(".json")) return;

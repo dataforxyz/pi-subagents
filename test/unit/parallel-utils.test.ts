@@ -6,6 +6,8 @@ import {
 	mapConcurrent,
 	aggregateParallelOutputs,
 	MAX_PARALLEL_CONCURRENCY,
+	DEFAULT_GLOBAL_CONCURRENCY_LIMIT,
+	Semaphore,
 	type RunnerSubagentStep,
 	type ParallelStepGroup,
 	type RunnerStep,
@@ -149,6 +151,49 @@ describe("mapConcurrent", () => {
 		const d2 = startTimes[2]! - startTimes[0]!;
 		assert.ok(d1 < 20, `worker 1 should start immediately, got ${d1}ms delay`);
 		assert.ok(d2 < 20, `worker 2 should start immediately, got ${d2}ms delay`);
+	});
+
+	it("respects a shared global semaphore across simultaneous calls", async () => {
+		const globalSemaphore = new Semaphore(2);
+		let running = 0;
+		let maxRunning = 0;
+		const run = (items: number[]) => mapConcurrent(items, items.length, async (item) => {
+			running++;
+			maxRunning = Math.max(maxRunning, running);
+			await new Promise((r) => setTimeout(r, 10));
+			running--;
+			return item;
+		}, globalSemaphore);
+
+		const results = await Promise.all([
+			run([1, 2, 3]),
+			run([4, 5, 6]),
+		]);
+
+		assert.deepEqual(results, [[1, 2, 3], [4, 5, 6]]);
+		assert.ok(maxRunning <= 2, `max concurrent was ${maxRunning}, expected <= 2`);
+	});
+
+	it("clamps invalid global semaphore limits to 1", async () => {
+		const globalSemaphore = new Semaphore(0);
+		let running = 0;
+		let maxRunning = 0;
+
+		await mapConcurrent([1, 2, 3], 3, async (item) => {
+			running++;
+			maxRunning = Math.max(maxRunning, running);
+			await new Promise((r) => setTimeout(r, 10));
+			running--;
+			return item;
+		}, globalSemaphore);
+
+		assert.equal(maxRunning, 1);
+	});
+});
+
+describe("DEFAULT_GLOBAL_CONCURRENCY_LIMIT", () => {
+	it("is 20", () => {
+		assert.equal(DEFAULT_GLOBAL_CONCURRENCY_LIMIT, 20);
 	});
 });
 

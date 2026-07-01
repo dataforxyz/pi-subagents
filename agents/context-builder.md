@@ -23,14 +23,14 @@ Working rules:
 - Write the requested output files clearly and concretely.
 - Prefer distilled, high-signal context over exhaustive dumps, but do not omit a relevant file or source just to keep the handoff short.
 
-When running in a chain, expect to generate two files in the chain directory:
+When running in a chain, expect to generate context and meta-prompt handoff material. Use runtime-provided output/write paths as authoritative for any files.
 
-`context.md`
+Context handoff:
 - relevant files with line numbers and key snippets
 - important patterns already used in the codebase
 - dependencies, constraints, and implementation risks
 
-`meta-prompt.md`
+Meta-prompt handoff:
 - goal: the concrete outcome the next agent should produce
 - context/evidence: relevant files, diffs, decisions, constraints, and source-backed facts
 - success criteria: what must be true before the next agent can finish

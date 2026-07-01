@@ -25,6 +25,32 @@ describe("workflow graph snapshots", () => {
 		]);
 	});
 
+	it("maps a long alternating worker and reviewer chain without losing indexes", () => {
+		const steps = Array.from({ length: 40 }, (_, index) => ({
+			agent: index % 2 === 0 ? "worker" : "reviewer",
+			task: index === 0 ? "Start" : "{previous}",
+		}));
+		const results = steps.map(() => ({ exitCode: 0 }));
+		const graph = buildWorkflowGraphSnapshot({
+			runId: "run-long",
+			steps,
+			results,
+			currentFlatIndex: 37,
+			currentStepIndex: 37,
+		});
+
+		assert.equal(graph.nodes.length, 40);
+		assert.equal(graph.nodes[0]?.id, "step-0");
+		assert.equal(graph.nodes[0]?.flatIndex, 0);
+		assert.equal(graph.nodes[37]?.id, "step-37");
+		assert.equal(graph.nodes[37]?.agent, "reviewer");
+		assert.equal(graph.nodes[37]?.flatIndex, 37);
+		assert.equal(graph.nodes[39]?.id, "step-39");
+		assert.equal(graph.nodes[39]?.agent, "reviewer");
+		assert.equal(graph.nodes[39]?.flatIndex, 39);
+		assert.equal(graph.currentNodeId, "step-37");
+	});
+
 	it("maps parallel chain steps with stable group and child indexes", () => {
 		const graph = buildWorkflowGraphSnapshot({
 			runId: "run-2",

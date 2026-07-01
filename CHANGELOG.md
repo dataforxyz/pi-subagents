@@ -2,6 +2,127 @@
 
 ## [Unreleased]
 
+### Added
+- Added `subagents.defaultModel` so subagents can have a global default model separate from the parent session model. Thanks to Artem Timofeev (@atimofeev) for #339.
+- Added `/subagent-cost` and `totalChildUsage` run details so parent sessions can inspect aggregate subagent child usage and cost. Thanks to Aaron Ky-Riesenbach (@aaronkyriesenbach) for #343.
+- Added configurable companion package recommendations for `pi-intercom` and `pi-prompt-template-model`, surfaced in session-start transcript messages, `subagent({ action: "list" })`, and `/subagents-doctor`, with `/subagents-companions` hide/show/status controls.
+- Added detached async runner stdout and stderr log files. Thanks to Daniel Mateos Carballares (@danim47c) for #358.
+- Added `totalCost` rollups to foreground single, parallel, and chain run details, including nested foreground subagent costs and compact progress display. Thanks to Clark Everson (@gr3enarr0w) for #345.
+- Added `globalConcurrencyLimit` to cap simultaneously running subagent tasks across parallel groups in a single run. Thanks to Clark Everson (@gr3enarr0w) for #349.
+- Added stable v1 async lifecycle artifact metadata in `status.json`, `events.jsonl`, and result JSON so observability and workflow gates can correlate subagent runs without scraping terminal output. Thanks to Clark Everson (@gr3enarr0w) for #350.
+- Added `PI_SUBAGENT_PI_BINARY` to let wrappers launch child agents through an explicit Pi binary instead of resolving `pi` from `PATH`. Thanks to David Barroso (@dbarrosop) for #341.
+- Added `worktreeBaseDir` and `PI_SUBAGENTS_WORKTREE_DIR` so worktree isolation can use a stable trusted base directory. Thanks to Matt Robenolt (@mattrobenolt) for #185.
+- Added `singleRunOutputBaseDir` so single-agent relative outputs can be routed to a configured artifact directory. Thanks to Oleksii Nikiforov (@NikiforovAll) for #173.
+- Added `maxSubagentSpawnsPerSession` and `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` to cap total subagent launches in one session. Thanks to @eightHundreds for #239.
+
+### Fixed
+- Keep generated subagent markdown outputs, progress files, and run artifacts under the project-local `.pi-subagents/` directory by default. Thanks to Carolina (@carolitascl) for #326.
+- Detach foreground subagent runs immediately when a child starts a blocking `contact_supervisor` or `intercom.ask` call, avoiding parent/child intercom deadlocks. Thanks to huarkiou (@huarkiou) for #335.
+- Made child boundary prompt editing instructions tool-agnostic so Codex-style adapters are not told to call unavailable `edit`/`write` tools. Thanks to Artem Timofeev (@atimofeev) for #338.
+- Recursively interrupt active async parallel children and nested async descendants when pausing a background run. Thanks to Vicary (@vicary) for #355.
+- Avoid runtime peer imports from detached async runners while still forwarding the Pi package root when available. Thanks to @aurbina83 for #352 and @huangkun3251 for #342.
+- Fall back to PATH `node` for async runners when the current Node executable path is stale or deleted. Thanks to Richard Hao (@0xRichardH) for #347.
+- Retry fallback models when a zero-exit subagent attempt produces no output, including background async runs, preserve structured-output-only completions, and pre-warm forked session files for parallel children. Thanks to Clark Everson (@gr3enarr0w) for #344.
+- Preserve explicit empty companion suggestion surfaces and keep global companion suggestions disabled when writing package dismissal state.
+- Include bounded async runner stderr tails when stale-run reconciliation marks a startup crash failed. Thanks to Salem Sayed (@salemsayed) for #340.
+- Persist forked child session files when Pi returns a branch path before writing it to disk. Thanks to @trisforrestcam for #174.
+- Pass explicit `thinking: off` through to child model arguments as a `:off` suffix. Thanks to Thomas Dietert (@tdietert) for #147.
+- Sanitize Anthropic signed `thinking` / `redacted_thinking` blocks out of forked child sessions and force child thinking off so fork-context subagents survive signed-thinking transcripts after branching or compaction. Thanks to Thomas Dietert (@tdietert) for #147.
+- Restore queued and running detached async jobs into the widget after restarting Pi. Thanks to Vicary (@vicary) for #362.
+- Clarify that `timeoutMs` and `maxRuntimeMs` apply only to foreground subagent runs. Thanks to @pkese for #361.
+
+## [0.31.1] - 2026-06-25
+
+### Added
+- Added `/chain` inline parallel groups with per-step metadata, group options, and tab completion. Thanks to loss-and-quick (@loss-and-quick) for #312.
+- Added subagent profile commands and provider model catalog generation for quota and quality model profiles. Thanks to tencnivel (@tencnivel) for #333.
+
+### Fixed
+- Discover `pi-intercom` installations created by `--extension npm:pi-intercom` under Pi's temporary npm extension cache. Thanks to loss-and-quick (@loss-and-quick) for #336.
+- Made async subagent interrupt, steer, and stop requests portable across platforms that do not support Unix signals. Thanks to AeonDave (@AeonDave) for #332.
+- Hardened profile commands by probing models without tools, rejecting unsafe profile/provider path tokens, and resolving short model IDs and thinking suffixes against the current registry.
+- Limited inline `/chain` acceptance values to levels expressible in slash syntax and kept completion disabled inside shared `--` tasks with literal parentheses.
+
+## [0.31.0] - 2026-06-24
+
+### Added
+- Added `subagents.disableThinking` so bundled builtin agents can drop thinking suffix defaults for providers that do not accept them. Thanks to Joshua Harding (@jhstatewide) for #212.
+- Discover nested grouped skills such as `.pi/skills/group/name/SKILL.md` so subagents match the host runtime's recursive skill lookup. Thanks to Weaxs (@Weaxs) for #262.
+- Follow Pi's configured project config directory for project-local agents, chains, skills, packages, settings, direct MCP config, and intercom package discovery instead of hardcoding `.pi`, while retaining `.pi` as the fallback for older Pi versions.
+
+### Changed
+- Hardened npm installs by tracking `package-lock.json`, pinning direct dependencies, and using `npm ci --ignore-scripts` in CI and release workflows. Thanks to Modestas Vainius (@modax) for #234.
+- List configured subagent skills by name, description, and file path instead of inlining full skill bodies, and ensure tool-restricted children can read those skill files on demand. Thanks to Ruben Paz (@Istar-Eldritch) for #183.
+
+### Fixed
+- Resolve the async result watcher directory with `fs.realpathSync.native()` before `fs.watch()` so Windows profiles with 8.3 temp paths do not crash Pi when async subagent results arrive. Thanks to kerushidao (@kerushidao) for #254.
+- Accept structured acceptance reports emitted in JSON-family fences when the fenced body has the acceptance-report shape. Thanks to Suleiman Tawil (@stawils) for #253.
+- Report field-level acceptance-report validation errors instead of a generic parse failure, and clarify array element types in the acceptance prompt. Thanks to Whisperfall (@Whisperfall) for #264 and josephkEA (@josephkEA) for the follow-up reproduction.
+- Simplified the public `acceptance` and chain tool schemas so Kimi/Moonshot-style parsers can load `subagent`, while runtime validation still rejects malformed acceptance config and dynamic fanout steps. Thanks to Sergio Agosti (@sergio-agosti) for #249.
+- Reject duplicate concurrent `subagent` execution calls while a prior subagent dispatch is still in progress, keeping intentional parallel mode within a single call unchanged. Thanks to desideratum (@desideratum) for #247.
+- Bound async `events.jsonl` growth by dropping noisy child `message_update` snapshots, capping persisted child diagnostics, and scanning control events in chunks during status polling. Thanks to Tri Van Pham (@pvtri96) for #246.
+- Keep crowded async subagent widgets at a stable collapsed height in short terminals, reducing destructive full-screen TUI redraws and flicker. Thanks to ssyram (@ssyram) for #186.
+- Actually wire the previously documented foreground-only `timeoutMs`/`maxRuntimeMs` aliases through single, parallel, chain, and dynamic fanout runs, including stable `timedOut: true` results, preserved partial output, manual-interrupt precedence, and skipped acceptance verification after timeout.
+- Apply `subagents.agentOverrides.<name>` to matching user-scope and project-scope custom agents, while keeping explicit agent frontmatter authoritative per field. Thanks to Jacek Juraszek (@jjuraszek) for #218.
+- Preserve compact foreground `write`/`edit` tool-call evidence in prompt-template delegation responses so convergence checks do not stop loops early. Thanks to Hans Schnedlitz (@hschne) for #207.
+- Respect each agent's `defaultContext` in mixed parallel and chain subagent calls when no explicit `context` is provided, so fresh-default scouts no longer inherit forked parent transcripts just because another agent in the same invocation defaults to fork. Thanks to Mitch Fultz (@fitchmultz) for #228.
+- Make runtime `output` overrides authoritative in child task and system prompts, and remove stale static filenames from bundled output-format instructions. Thanks to youngshine (@smithyyang) for #223.
+- Keep top-level parallel `defaultProgress` files in run-scoped artifact storage instead of the parent working directory. Thanks to youngshine (@smithyyang) for #224.
+
+## [0.30.0] - 2026-06-20
+
+### Added
+- Allow active async chains to accept an `append-step` request that adds one new tail step while the chain is still running.
+- Allow async subagent results to be attached as the root step of a new follow-up chain.
+- Added `subagentOnlyExtensions` so agents can pass selected tool extensions only to spawned subagents without exposing them to the parent agent.
+- Added proactive skill-subagent suggestions to `subagent({ action: "list" })` based on repeatedly configured skill use, while keeping the behavior advisory and opt-out friendly.
+- Added regression coverage for long worker/reviewer chains and parallel -> funnel -> fanout chain flows across foreground and async execution.
+
+### Fixed
+- Interrupt live async children before delivering `resume` follow-up messages so intercom nudges reach workers that are stuck mid-turn more reliably.
+- Reject appended chain steps with duplicate reserved output names or unknown named-output references before they are queued.
+- Ignore legacy `.agents/skills` files during agent discovery so skill definitions are not registered as subagents. Thanks to chyax98 (@chyax98) for #257.
+- Launch detached async runners through Node when Pi itself is not the Node executable. Thanks to Tetsuya.dev (@tetsuya-dev-jp) for #273.
+- Preserve the slash command requester context when bridge requests launch subagents. Thanks to Victor Sumner (@vsumner) for #268.
+- Trim repeated nested `subagent` tool schema descriptions so provider payloads stay compact while retaining top-level parameter guidance. Thanks to Thomas Mustier (@tmustier) for #250.
+
+## [0.29.0] - 2026-06-19
+
+### Added
+- Added package-provided agent and chain discovery from installed Pi packages and package settings, including read-only management behavior, package source counts in doctor output, nested-cwd project package discovery, and package definitions that remain below user/project overrides. Thanks to Fabian Jocks (@iamfj) for #278.
+- Added `PI_SUBAGENT_EXTRA_AGENT_DIRS` and `PI_INTERCOM_EXTENSION_DIR` overrides so bundled agents and `pi-intercom` can be loaded from read-only package locations. Thanks to David Barroso (@dbarrosop) for #288.
+
+### Fixed
+- Show captured output from failed foreground subagents instead of returning only the failure summary. Thanks to Jürgen Schmied (@jschmied) for #277.
+- Preserve nested fanout child subagent history when building child prompts. Thanks to James Wood (@jamesjwood) for the original #270 fix.
+- Retry Windows atomic JSON renames on transient `EPERM`, `EBUSY`, and `EACCES` failures. Thanks to Wings Butterfly (@wings1848) for #269.
+- Inherit the parent session model for subagents instead of falling back to global settings, including foreground, chain, async chain, async single, and resume/revive paths. Thanks to Rogerio Saulo (@rsaulo) for #266 and Nicolas Marchildon (@elecnix) for the original #283 fix.
+- Avoid duplicate `subagent` tool registration in fanout-authorized child processes. Thanks to Aleksei Gurianov (@Guria) for #279.
+- Hardened the parallel intercom integration test fixture after Windows CI exposed nondeterministic failure ordering.
+
+## [0.28.0] - 2026-06-03
+
+### Added
+- Added foreground-only `timeoutMs`/`maxRuntimeMs` for single, parallel, and chain subagent runs. Timed-out children are soft-interrupted, keep completed sibling/prior results, and return `timedOut: true` with a stable timeout message.
+- Added per-agent `maxExecutionTimeMs` and `maxTokens` resource limits. Foreground and async children stop with a clear `resourceLimitExceeded` result when the configured runtime or observed token budget is reached.
+
+### Changed
+- Strengthened tool and skill guidance so writer subagents launched from plans, specs, issues, or broad fixes proactively use structured `acceptance` instead of burying validation requirements only in task prose.
+
+### Fixed
+- Removed a provider-unfriendly required-only subschema from the public `acceptance` tool schema so Kimi models served through OpenCode Go can load the `subagent` tool, while keeping runtime validation for empty acceptance contracts.
+- Clarified acceptance-report prompts so required evidence like `diff-summary` must be copied into structured JSON fields such as `diffSummary`, not only described in visible prose.
+
+## [0.27.0] - 2026-05-30
+
+### Changed
+- Reworked public acceptance config to be object-only and evidence-driven, removing public `level`/disable shorthands. Explicit acceptance now triggers a same-session self-review/repair finalization loop, with `maxFinalizationTurns` controlling the cap.
+- Documented goal-style acceptance guidance so `/goal`, “active goal”, and “work until evidence says done” requests map to run-scoped `acceptance` contracts.
+- Refined acceptance finalization prompts and status output to emphasize evidence, blockers, stop rules, and finalization progress such as `completed after 1/3 turns`.
+
+### Fixed
+- Treat explicit acceptance as the completion contract for acceptance-enabled runs, avoiding implementation completion-guard false positives when the visible output is only an `acceptance-report` or a finalization self-review turn does not need a repair edit.
+
 ## [0.26.0] - 2026-05-29
 
 ### Added

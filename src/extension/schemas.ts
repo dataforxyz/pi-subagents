@@ -5,13 +5,38 @@
 import { Type } from "typebox";
 import { SUBAGENT_ACTIONS } from "../shared/types.ts";
 
+function keepTopLevelParameterDescriptions<T>(schema: T): T {
+	return pruneNestedDescriptions(schema, []) as T;
+}
+
+function pruneNestedDescriptions(value: unknown, path: string[]): unknown {
+	if (!value || typeof value !== "object") return value;
+
+	const result = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor) continue;
+		if (key === "description" && !isTopLevelParameterDescription(path)) continue;
+		if ("value" in descriptor) {
+			const nextPath = typeof key === "string" ? [...path, key] : path;
+			descriptor.value = pruneNestedDescriptions(descriptor.value, nextPath);
+		}
+		Object.defineProperty(result, key, descriptor);
+	}
+	return result;
+}
+
+function isTopLevelParameterDescription(path: string[]): boolean {
+	return path.length === 2 && path[0] === "properties";
+}
+
 const SkillOverride = Type.Unsafe({
 	anyOf: [
 		{ type: "array", items: { type: "string" } },
 		{ type: "boolean" },
 		{ type: "string" },
 	],
-	description: "Skill name(s) to inject (comma-separated), array of strings, or boolean (false disables, true uses default)",
+	description: "Skill name(s) to make available (comma-separated), array of strings, or boolean (false disables, true uses default)",
 });
 
 const OutputOverride = Type.Unsafe({
@@ -41,72 +66,11 @@ const JsonSchemaObject = Type.Unsafe({
 	description: "JSON Schema object for strict structured output. Non-object roots are rejected.",
 });
 
-const AcceptanceEvidenceKind = Type.String({
-	enum: [
-		"changed-files",
-		"tests-added",
-		"commands-run",
-		"validation-output",
-		"residual-risks",
-		"no-staged-files",
-		"diff-summary",
-		"review-findings",
-		"manual-notes",
-	],
-});
-
-const AcceptanceGateSchema = Type.Object({
-	id: Type.String(),
-	must: Type.String(),
-	evidence: Type.Optional(Type.Array(AcceptanceEvidenceKind)),
-	severity: Type.Optional(Type.String({ enum: ["required", "recommended"] })),
-}, { additionalProperties: false });
-
-const AcceptanceVerifyCommandSchema = Type.Object({
-	id: Type.String(),
-	command: Type.String(),
-	timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
-	cwd: Type.Optional(Type.String()),
-	env: Type.Optional(Type.Unsafe({ type: "object", additionalProperties: { type: "string" } })),
-	allowFailure: Type.Optional(Type.Boolean()),
-}, { additionalProperties: false });
-
-const AcceptanceReviewGateSchema = Type.Object({
-	agent: Type.Optional(Type.String()),
-	focus: Type.Optional(Type.String()),
-	required: Type.Optional(Type.Boolean()),
-}, { additionalProperties: false });
-
 const AcceptanceOverride = Type.Unsafe({
 	anyOf: [
 		{ type: "string", enum: ["auto", "none", "attested", "checked", "verified", "reviewed"] },
-		{ const: false },
-		{
-			type: "object",
-			properties: {
-				level: { type: "string", enum: ["auto", "none", "attested", "checked", "verified", "reviewed"] },
-				criteria: {
-					type: "array",
-					items: {
-						anyOf: [
-							{ type: "string" },
-							AcceptanceGateSchema,
-						],
-					},
-				},
-				evidence: { type: "array", items: AcceptanceEvidenceKind },
-				verify: { type: "array", items: AcceptanceVerifyCommandSchema },
-				review: {
-					anyOf: [
-						{ const: false },
-						AcceptanceReviewGateSchema,
-					],
-				},
-				stopRules: { type: "array", items: { type: "string" } },
-				reason: { type: "string" },
-			},
-			additionalProperties: false,
-		},
+		{ type: "boolean", enum: [false] },
+		{ type: "object", additionalProperties: true },
 	],
 	description: "Optional acceptance policy. Omitted means auto-inferred; verified requires configured runtime commands.",
 });
@@ -211,11 +175,6 @@ const ChainItem = Type.Object({
 }, {
 	description: "Chain step: use {agent, task?, ...} for sequential, {parallel: [...]} for static concurrent execution, or {expand, parallel: {...}, collect} for dynamic fanout.",
 	additionalProperties: false,
-	allOf: [
-		{ if: { required: ["expand"] }, then: { required: ["parallel", "collect"], properties: { parallel: { type: "object" } } } },
-		{ if: { required: ["collect"] }, then: { required: ["expand", "parallel"], properties: { parallel: { type: "object" } } } },
-		{ not: { required: ["expand"], properties: { parallel: { type: "array", items: {} } } } },
-	],
 });
 
 const NotifyOverrides = Type.Object({
@@ -237,7 +196,7 @@ const ControlOverrides = Type.Object({
 	})),
 });
 
-export const SubagentParams = Type.Object({
+const SubagentParamsSchema = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Agent name (SINGLE mode) or target for management get/update/delete" })),
 	task: Type.Optional(Type.String({ description: "Task (SINGLE mode, optional for self-contained agents)" })),
 	// Management action (when present, tool operates in management mode)
@@ -246,10 +205,10 @@ export const SubagentParams = Type.Object({
 		description: "Management/control action. Omit for execution mode."
 	})),
 	id: Type.Optional(Type.String({
-		description: "Run id or prefix for action='status', action='interrupt', or action='resume'."
+		description: "Run id or prefix for action='status', action='interrupt', action='resume', or action='append-step'."
 	})),
 	runId: Type.Optional(Type.String({
-		description: "Target run ID for action='interrupt' or action='resume'. Defaults to the most recently active controllable run for interrupt. Prefer id for new calls."
+		description: "Target run ID for action='interrupt', action='resume', or action='append-step'. Defaults to the most recently active controllable run for interrupt. Prefer id for new calls."
 	})),
 	dir: Type.Optional(Type.String({
 		description: "Async run directory for action='status' or action='resume'."
@@ -266,26 +225,26 @@ export const SubagentParams = Type.Object({
 			{ type: "object", additionalProperties: true },
 			{ type: "string" },
 		],
-		description: "Agent or chain config for create/update. Agent: name, package (optional namespace; runtime name becomes package.name), description, scope ('user'|'project', default 'user'), systemPrompt, systemPromptMode, inheritProjectContext, inheritSkills, defaultContext ('fresh'|'fork'), model, tools (comma-separated), extensions (comma-separated), skills (comma-separated), thinking, output, reads, progress, maxSubagentDepth. Chain: name, package, description, scope, steps (array of {agent, task?, output?, outputMode?, reads?, model?, skill?, progress?}). Presence of 'steps' creates a chain instead of an agent. String values must be valid JSON."
+		description: "Agent/chain config for create/update. Object or JSON string; presence of steps creates a chain."
 	})),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "PARALLEL mode: [{agent, task, count?, output?, outputMode?, reads?, progress?}, ...]" })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Top-level PARALLEL mode only: max concurrent tasks. Defaults to config.parallel.concurrency or 4." })),
 	worktree: Type.Optional(Type.Boolean({
-		description: "Create isolated git worktrees for each parallel task. " +
-			"Prevents filesystem conflicts. Requires clean git state. " +
-			"Per-worktree diffs included in output."
+		description: "Create isolated git worktrees for parallel tasks; requires clean git state."
 	})),
-	chain: Type.Optional(Type.Array(ChainItem, { description: "CHAIN mode: sequential pipeline where each step's response becomes {previous} for the next. Use {task}, {previous}, {chain_dir} in task templates." })),
+	chain: Type.Optional(Type.Array(ChainItem, { description: "CHAIN mode: sequential steps; each result becomes {previous}. append-step takes one tail step and may use {chain_dir}/{outputs.name}." })),
 	context: Type.Optional(Type.String({
 		enum: ["fresh", "fork"],
-		description: "'fresh' or 'fork' to branch from parent session. If omitted, any requested agent with defaultContext: 'fork' makes the whole invocation forked; otherwise the default is 'fresh'.",
+		description: "'fresh' or 'fork' to branch from parent session. Explicit context overrides every child in the invocation. If omitted, each requested agent uses its own defaultContext; agents without defaultContext: 'fork' run fresh.",
 	})),
 	parent: Type.Optional(Type.String({
 		enum: ["auto", "main", "current"],
 		description: "Ownership/routing for subagents created inside fork handlers. auto (default) adopts async fork-launched subagents into the inherited main dialog when available while sync runs stay with the current fork; main forces inherited main-dialog ownership; current keeps the subagent owned by the creating fork/session.",
 	})),
-	chainDir: Type.Optional(Type.String({ description: "Persistent directory for chain artifacts. Default: a user-scoped temp directory under <tmpdir>/ (auto-cleaned after 24h)" })),
+	chainDir: Type.Optional(Type.String({ description: "Persistent chain artifact directory; defaults to user-scoped temp storage." })),
 	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional foreground-only timeout in ms; omit for async/background runs. Alias of maxRuntimeMs." })),
+	maxRuntimeMs: Type.Optional(Type.Integer({ minimum: 1, description: "Alias of timeoutMs for optional foreground-only timeout; omit for async/background runs." })),
 	agentScope: Type.Optional(Type.String({ description: "Agent discovery scope: 'user', 'project', or 'both' (default: 'both'; project wins on name collisions)" })),
 	cwd: Type.Optional(Type.String()),
 	artifacts: Type.Optional(Type.Boolean({ description: "Write debug artifacts (default: true)" })),
@@ -311,3 +270,5 @@ export const SubagentParams = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for single agent (e.g. 'anthropic/claude-sonnet-4')" })),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
+
+export const SubagentParams = keepTopLevelParameterDescriptions(SubagentParamsSchema);
