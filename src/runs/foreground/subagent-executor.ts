@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, type AgentScope } from "../../agents/agents.ts";
@@ -103,13 +105,33 @@ type BackgroundEventsModule = {
 		close: () => void;
 	};
 };
-const BACKGROUND_EVENTS_MODULE = "pi-forks/background-events";
+const DEFAULT_BACKGROUND_EVENTS_MODULE = "pi-forks/background-events";
 let backgroundEventsImport: Promise<BackgroundEventsModule | undefined> | undefined;
+let backgroundEventsImportSpecifier: string | undefined;
+
+function installedPiForksBackgroundEventsModule(): string | undefined {
+	const agentDir = process.env.PI_CODING_AGENT_DIR?.trim()
+		? path.resolve(process.env.PI_CODING_AGENT_DIR.trim())
+		: path.join(os.homedir(), ".pi", "agent");
+	const filePath = path.join(agentDir, "git", "github.com", "dataforxyz", "pi-forks", "src", "background-events.ts");
+	return fs.existsSync(filePath) ? pathToFileURL(filePath).href : undefined;
+}
 
 async function loadBackgroundEventsModule(): Promise<BackgroundEventsModule | undefined> {
-	backgroundEventsImport ??= import(BACKGROUND_EVENTS_MODULE)
-		.then((module) => module as BackgroundEventsModule)
-		.catch(() => undefined);
+	const specifier = process.env.PI_BACKGROUND_EVENTS_MODULE?.trim() || DEFAULT_BACKGROUND_EVENTS_MODULE;
+	const fallbacks = [specifier, installedPiForksBackgroundEventsModule()].filter(Boolean) as string[];
+	const cacheKey = fallbacks.join("\n");
+	if (!backgroundEventsImport || backgroundEventsImportSpecifier !== cacheKey) {
+		backgroundEventsImportSpecifier = cacheKey;
+		backgroundEventsImport = (async () => {
+			for (const candidate of fallbacks) {
+				try {
+					return await import(candidate) as BackgroundEventsModule;
+				} catch {}
+			}
+			return undefined;
+		})();
+	}
 	return backgroundEventsImport;
 }
 
