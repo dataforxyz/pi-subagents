@@ -34,6 +34,7 @@ import { registerSlashSubagentBridge } from "../slash/slash-bridge.ts";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "../slash/slash-live-state.ts";
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import registerSubagentNotify, { type SubagentNotifyDetails } from "../runs/background/notify.ts";
+import { drainSubagentBackgroundQueue } from "../runs/background/fork-handler.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_FANOUT_CHILD_ENV } from "../runs/shared/pi-args.ts";
 import { compactRoutineHandlerReceiptMessages } from "../runs/shared/subagent-prompt-runtime.ts";
 import registerFanoutChildSubagentExtension from "./fanout-child.ts";
@@ -582,6 +583,9 @@ DIAGNOSTICS:
 
 	pi.on("session_start", (_event, ctx) => {
 		resetSessionState(ctx);
+		void drainSubagentBackgroundQueue(pi, config.backgroundForkHandlers, { onActivity: markActivity }).catch((error) => {
+			console.error("[pi-subagents] Failed to drain background event queue:", error);
+		});
 	});
 
 	pi.on("session_shutdown", () => {

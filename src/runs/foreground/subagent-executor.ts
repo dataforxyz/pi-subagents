@@ -94,6 +94,61 @@ import {
 	wrapForkTask,
 } from "../../shared/types.ts";
 
+type BackgroundEventsModule = {
+	BackgroundEventsStore: new (...args: never[]) => {
+		chargeAutoForkForLineage?: (input: Record<string, unknown>) => { allowed: boolean; reason?: string };
+		upsertLineageBudget: (input: Record<string, unknown>) => void;
+		canAutoFork: (input: { forkDepth?: number; maxForkDepth?: number; lineageId?: string; forkable?: boolean }) => { allowed: boolean; reason?: string };
+		chargeLineageFollowup: (input: { lineageId: string; forkable?: boolean; now?: number }) => { allowed: boolean; reason?: string };
+		close: () => void;
+	};
+};
+const BACKGROUND_EVENTS_MODULE = "pi-forks/background-events";
+let backgroundEventsImport: Promise<BackgroundEventsModule | undefined> | undefined;
+
+async function loadBackgroundEventsModule(): Promise<BackgroundEventsModule | undefined> {
+	backgroundEventsImport ??= import(BACKGROUND_EVENTS_MODULE)
+		.then((module) => module as BackgroundEventsModule)
+		.catch(() => undefined);
+	return backgroundEventsImport;
+}
+
+function currentBackgroundForkDepth(env: NodeJS.ProcessEnv = process.env): number {
+	const parsed = Number(env.PI_BACKGROUND_FORK_DEPTH ?? "0");
+	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+function maxBackgroundForkDepth(env: NodeJS.ProcessEnv = process.env): number {
+	const parsed = Number(env.PI_BACKGROUND_MAX_FORK_DEPTH ?? "1");
+	return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 1;
+}
+
+async function chargeAsyncSubagentLineageFromEnv(): Promise<{ allowed: boolean; reason?: string }> {
+	const lineageId = process.env.PI_BACKGROUND_LINEAGE_ID?.trim();
+	if (!lineageId) return { allowed: true };
+	const module = await loadBackgroundEventsModule();
+	if (!module) return { allowed: true };
+	const store = new module.BackgroundEventsStore();
+	try {
+		const input = {
+			lineageId,
+			rootEventId: process.env.PI_BACKGROUND_EVENT_ID,
+			rootWorkKey: process.env.PI_BACKGROUND_WORK_KEY,
+			originHandlerId: process.env.PI_BACKGROUND_HANDLER_ID,
+			forkDepth: currentBackgroundForkDepth(),
+			maxForkDepth: maxBackgroundForkDepth(),
+			forkable: true,
+		};
+		if (store.chargeAutoForkForLineage) return store.chargeAutoForkForLineage(input);
+		store.upsertLineageBudget(input);
+		const gate = store.canAutoFork({ lineageId, forkDepth: input.forkDepth, maxForkDepth: input.maxForkDepth, forkable: true });
+		if (!gate.allowed) return gate;
+		return store.chargeLineageFollowup({ lineageId, forkable: true });
+	} finally {
+		store.close();
+	}
+}
+
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete"]);
 
@@ -2527,6 +2582,13 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 
 		let nestedForegroundStarted = false;
 		try {
+			if (effectiveAsync) {
+				const lineageGate = await chargeAsyncSubagentLineageFromEnv().catch((error) => {
+					console.error("[pi-subagents] Failed to charge background lineage for async subagent execution:", error);
+					return { allowed: false, reason: "lineage-charge-failed" };
+				});
+				if (!lineageGate.allowed) return toExecutionErrorResult(effectiveParams, `subagent async background lineage budget exhausted: ${lineageGate.reason ?? "lineage-fork-budget"}`);
+			}
 			const asyncResult = runAsyncPath(execData, deps);
 			if (asyncResult) return withForkContext(asyncResult, effectiveParams.context);
 			if (foregroundControl) {

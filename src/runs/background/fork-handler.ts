@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildForkHandlerEnv, buildForkRunPaths, getForkHandlersFile, getForkStateDir, launchDetachedFork } from "../../shared/fork-runtime.ts";
 import { SUBAGENT_CHILD_ENV } from "../shared/pi-args.ts";
@@ -7,6 +8,20 @@ import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import type { BackgroundForkHandlersConfig } from "../../shared/types.ts";
 
 export type BackgroundForkHandlerNotify = "ack-and-summary" | "summary" | "none";
+
+export function currentBackgroundForkDepth(env: NodeJS.ProcessEnv = process.env): number {
+	const parsed = Number(env.PI_BACKGROUND_FORK_DEPTH ?? "0");
+	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+export function maxBackgroundForkDepth(env: NodeJS.ProcessEnv = process.env): number {
+	const parsed = Number(env.PI_BACKGROUND_MAX_FORK_DEPTH ?? "1");
+	return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 1;
+}
+
+export function backgroundForkDepthExceeded(env: NodeJS.ProcessEnv = process.env): boolean {
+	return currentBackgroundForkDepth(env) >= maxBackgroundForkDepth(env);
+}
 
 export interface ResolvedBackgroundForkHandlersConfig {
 	enabled: boolean;
@@ -71,6 +86,33 @@ const HANDLERS_LOCK_TIMEOUT_MS = 5_000;
 const HANDLERS_LOCK_STALE_MS = 30_000;
 const HANDLERS_LOCK_RETRY_MS = 25;
 
+type BackgroundRouterDecision = "fork" | "wake_main" | "display" | "queue";
+type BackgroundEventsModule = {
+	BackgroundEventsStore: new (...args: never[]) => {
+		routeEvent: (envelope: Record<string, unknown>, options?: Record<string, unknown>) => { disposition: string; handlerId?: string; queueId?: string };
+		runReconcilerPass: (options: Record<string, unknown>) => { leaseAcquired: boolean; launchBundles?: Array<{ handlerId: string; source: string; events: Array<{ payloadPath: string }> }> };
+		markHandlerRunning: (handlerId: string, input?: Record<string, unknown>) => void;
+		failHandlerLaunch: (handlerId: string, options?: Record<string, unknown>) => unknown;
+		completeHandler: (handlerId: string, input?: Record<string, unknown>) => string | undefined;
+		chargeAutoForkForLineage?: (input: Record<string, unknown>) => { allowed: boolean; reason?: string };
+		upsertLineageBudget: (input: Record<string, unknown>) => void;
+		canAutoFork: (input: { forkDepth?: number; maxForkDepth?: number; lineageId?: string; forkable?: boolean }) => { allowed: boolean; reason?: string };
+		chargeLineageFollowup: (input: { lineageId: string; forkable?: boolean; now?: number }) => { allowed: boolean; reason?: string };
+		close: () => void;
+	};
+	runOptionalRouterDecision?: (input: {
+		config?: Record<string, unknown>;
+		fallback: BackgroundRouterDecision;
+		railsAllowed?: BackgroundRouterDecision[];
+		ambiguous?: boolean;
+		decide?: (input: { fallback: BackgroundRouterDecision; railsAllowed?: BackgroundRouterDecision[] }) => unknown;
+	}) => Promise<{ decision: BackgroundRouterDecision; reason: string }>;
+	namespacedEventId: (source: "subagents", durableId: string) => string;
+};
+const DEFAULT_BACKGROUND_EVENTS_MODULE = "pi-forks/background-events";
+let backgroundEventsImport: Promise<BackgroundEventsModule | undefined> | undefined;
+let backgroundEventsImportSpecifier: string | undefined;
+
 const activeBackgroundForkReservations = new Map<string, BackgroundForkRun>();
 let persistedRunsQueue: Promise<void> = Promise.resolve();
 
@@ -116,6 +158,144 @@ function sanitizeSegment(value: string): string {
 
 function makeRunId(event: SubagentBackgroundForkEvent): string {
 	return `sbf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${sanitizeSegment(event.type)}`;
+}
+
+function stableJson(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+	if (value && typeof value === "object") {
+		return `{${Object.entries(value as Record<string, unknown>)
+			.filter(([, entryValue]) => entryValue !== undefined)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableJson(entryValue)}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
+
+function shortHash(value: string): string {
+	return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function subagentParentNamespace(event: SubagentBackgroundForkEvent): string {
+	return event.parentSessionFile ?? event.parentIntercomTarget ?? `subagents:${shortHash(stableJson({ cwd: event.cwd ?? process.cwd(), title: event.title }))}`;
+}
+
+export function subagentBackgroundEventId(event: SubagentBackgroundForkEvent, runId: string): string {
+	return `subagents:${event.type}:${runId}`;
+}
+
+function subagentWorkIdentity(event: SubagentBackgroundForkEvent): string {
+	const details = objectValue(event.details);
+	const nestedEvent = objectValue(details?.event);
+	const candidates = [
+		stringValue(details?.runId),
+		stringValue(nestedEvent?.runId),
+		stringValue(details?.sessionValue),
+		stringValue(details?.childIntercomTarget),
+		stringValue(nestedEvent?.agent),
+	].filter(Boolean);
+	return candidates.length > 0 ? candidates.join(":") : shortHash(stableJson({ type: event.type, title: event.title, content: event.content, details: event.details }));
+}
+
+function subagentWorkKey(event: SubagentBackgroundForkEvent): string {
+	return `subagents:${subagentParentNamespace(event)}:${event.type}:${subagentWorkIdentity(event)}`;
+}
+
+async function loadBackgroundEventsModule(): Promise<BackgroundEventsModule | undefined> {
+	const specifier = process.env.PI_BACKGROUND_EVENTS_MODULE?.trim() || DEFAULT_BACKGROUND_EVENTS_MODULE;
+	if (!backgroundEventsImport || backgroundEventsImportSpecifier !== specifier) {
+		backgroundEventsImportSpecifier = specifier;
+		backgroundEventsImport = import(specifier)
+			.then((module) => module as BackgroundEventsModule)
+			.catch(() => undefined);
+	}
+	return backgroundEventsImport;
+}
+
+async function fileSnapshot(filePath: string): Promise<{ sha256: string; bytes: number }> {
+	const data = await fs.promises.readFile(filePath);
+	return { sha256: createHash("sha256").update(data).digest("hex"), bytes: data.byteLength };
+}
+
+async function routeSubagentBackgroundEvent(event: SubagentBackgroundForkEvent, run: BackgroundForkRun): Promise<{ disposition: string; handlerId?: string; queueId?: string } | undefined> {
+	const module = await loadBackgroundEventsModule();
+	if (!module) return undefined;
+	const snapshot = await fileSnapshot(run.eventPath);
+	const parentNamespace = subagentParentNamespace(event);
+	const workKey = subagentWorkKey(event);
+	const store = new module.BackgroundEventsStore();
+	try {
+		return store.routeEvent({
+			version: 1,
+			source: "subagents",
+			eventId: module.namespacedEventId("subagents", subagentBackgroundEventId(event, run.id)),
+			workKey,
+			parentNamespace,
+			parent: {
+				sessionId: parentNamespace,
+				...(event.parentSessionFile ? { sessionFile: event.parentSessionFile } : {}),
+				...(event.parentIntercomTarget ? { intercomTarget: event.parentIntercomTarget } : {}),
+				cwd: run.cwd,
+			},
+			createdAt: run.startedAt ?? Date.now(),
+			priority: event.type === "control-notice" ? "high" : "normal",
+			payloadPath: run.eventPath,
+			payloadSha256: snapshot.sha256,
+			payloadBytes: snapshot.bytes,
+			needsDecision: event.type === "control-notice",
+			eventType: event.type,
+			origin: {
+				forkDepth: currentBackgroundForkDepth(),
+				handlerId: process.env.PI_BACKGROUND_HANDLER_ID,
+				rootEventId: process.env.PI_BACKGROUND_EVENT_ID,
+				rootWorkKey: process.env.PI_BACKGROUND_WORK_KEY,
+				lineageId: process.env.PI_BACKGROUND_LINEAGE_ID,
+			},
+		}, { handlerId: run.id });
+	} finally {
+		store.close();
+	}
+}
+
+async function markBackgroundHandlerRunning(run: BackgroundForkRun): Promise<void> {
+	const module = await loadBackgroundEventsModule();
+	if (!module) return;
+	const store = new module.BackgroundEventsStore();
+	try {
+		store.markHandlerRunning(run.id, { pid: run.pid, supervisorPid: process.pid, processGroupId: run.pid });
+	} finally {
+		store.close();
+	}
+}
+
+async function failBackgroundHandlerLaunch(handlerId: string, error: unknown): Promise<void> {
+	const module = await loadBackgroundEventsModule();
+	if (!module) return;
+	const store = new module.BackgroundEventsStore();
+	try {
+		store.failHandlerLaunch(handlerId, { error: error instanceof Error ? error.message : String(error), requeue: true });
+	} finally {
+		store.close();
+	}
+}
+
+async function completeBackgroundHandler(run: BackgroundForkRun): Promise<void> {
+	const module = await loadBackgroundEventsModule();
+	if (!module) return;
+	const store = new module.BackgroundEventsStore();
+	try {
+		store.completeHandler(run.id, { status: run.status === "complete" ? "complete" : "failed", summaryPath: run.stdoutPath });
+	} finally {
+		store.close();
+	}
 }
 
 async function readPersistedRuns(): Promise<BackgroundForkRun[]> {
@@ -412,6 +592,63 @@ function sendFallback(pi: Pick<ExtensionAPI, "sendMessage">, event: SubagentBack
 	);
 }
 
+function isSubagentBackgroundForkEvent(value: unknown): value is SubagentBackgroundForkEvent {
+	const event = value as Partial<SubagentBackgroundForkEvent> | undefined;
+	return !!event && (event.type === "async-complete" || event.type === "async-step-complete" || event.type === "control-notice") && typeof event.title === "string" && typeof event.content === "string";
+}
+
+export async function drainSubagentBackgroundQueue(
+	pi: Pick<ExtensionAPI, "sendMessage">,
+	config: BackgroundForkHandlersConfig | undefined,
+	options: { onActivity?: () => void } = {},
+): Promise<number> {
+	const module = await loadBackgroundEventsModule();
+	if (!module) return 0;
+	const store = new module.BackgroundEventsStore();
+	try {
+		const pass = store.runReconcilerPass({ leaseName: "subagents", ownerId: `subagents:${process.pid}`, leaseTtlMs: 30_000, dequeueLimit: 4 });
+		let launched = 0;
+		for (const bundle of pass.launchBundles ?? []) {
+			if (bundle.source !== "subagents") continue;
+			const firstEvent = bundle.events[0];
+			if (!firstEvent) continue;
+			const parsed = JSON.parse(await fs.promises.readFile(firstEvent.payloadPath, "utf8"));
+			if (!isSubagentBackgroundForkEvent(parsed)) continue;
+			await deliverBackgroundForkEvent(pi, config, parsed, { onActivity: options.onActivity, handlerId: bundle.handlerId, skipBackgroundRoute: true });
+			launched += 1;
+		}
+		return launched;
+	} finally {
+		store.close();
+	}
+}
+
+async function chargeBackgroundLineageAutoForkFromEnv(): Promise<{ allowed: boolean; reason?: string }> {
+	const lineageId = process.env.PI_BACKGROUND_LINEAGE_ID?.trim();
+	if (!lineageId) return { allowed: true };
+	const module = await loadBackgroundEventsModule();
+	if (!module) return { allowed: true };
+	const store = new module.BackgroundEventsStore();
+	try {
+		const input = {
+			lineageId,
+			rootEventId: process.env.PI_BACKGROUND_EVENT_ID,
+			rootWorkKey: process.env.PI_BACKGROUND_WORK_KEY,
+			originHandlerId: process.env.PI_BACKGROUND_HANDLER_ID,
+			forkDepth: currentBackgroundForkDepth(),
+			maxForkDepth: maxBackgroundForkDepth(),
+			forkable: true,
+		};
+		if (store.chargeAutoForkForLineage) return store.chargeAutoForkForLineage(input);
+		store.upsertLineageBudget(input);
+		const gate = store.canAutoFork({ lineageId, forkDepth: input.forkDepth, maxForkDepth: input.maxForkDepth, forkable: true });
+		if (!gate.allowed) return gate;
+		return store.chargeLineageFollowup({ lineageId, forkable: true });
+	} finally {
+		store.close();
+	}
+}
+
 function contextCanWakeParentDirect(ctx: ExtensionContext | undefined): boolean {
 	if (!ctx) return false;
 	try {
@@ -421,14 +658,26 @@ function contextCanWakeParentDirect(ctx: ExtensionContext | undefined): boolean 
 	}
 }
 
+async function routeSubagentForkWithOptionalRouter(event: SubagentBackgroundForkEvent, resolved: ResolvedBackgroundForkHandlersConfig): Promise<{ decision: BackgroundRouterDecision; reason: string }> {
+	const module = await loadBackgroundEventsModule();
+	const advisoryDecision = process.env.PI_BACKGROUND_ROUTER_DECISION?.trim();
+	if (!module?.runOptionalRouterDecision || !advisoryDecision) return { decision: "fork", reason: "disabled" };
+	return module.runOptionalRouterDecision({
+		fallback: "fork",
+		railsAllowed: ["fork", "wake_main", "display"],
+		ambiguous: resolved.mode === "auto" || event.type === "control-notice",
+		decide: () => advisoryDecision,
+	});
+}
+
 export async function deliverBackgroundForkEvent(
 	pi: Pick<ExtensionAPI, "sendMessage">,
 	config: BackgroundForkHandlersConfig | undefined,
 	event: SubagentBackgroundForkEvent,
-	options: { onActivity?: () => void; getContext?: () => ExtensionContext | undefined } = {},
+	options: { onActivity?: () => void; getContext?: () => ExtensionContext | undefined; handlerId?: string; skipBackgroundRoute?: boolean } = {},
 ): Promise<void> {
 	const resolved = resolveBackgroundForkHandlersConfig(config);
-	if (!resolved.enabled) {
+	if (!resolved.enabled || backgroundForkDepthExceeded()) {
 		options.onActivity?.();
 		sendFallback(pi, event);
 		return;
@@ -438,9 +687,27 @@ export async function deliverBackgroundForkEvent(
 		sendFallback(pi, event);
 		return;
 	}
+	const lineageGate = await chargeBackgroundLineageAutoForkFromEnv().catch((error) => {
+		console.error("[pi-subagents] Failed to charge background lineage for fork delivery:", error);
+		return { allowed: false, reason: "lineage-charge-failed" };
+	});
+	if (!lineageGate.allowed) {
+		options.onActivity?.();
+		sendFallback(pi, event);
+		return;
+	}
+	const routerDecision = await routeSubagentForkWithOptionalRouter(event, resolved).catch((error) => {
+		console.error("[pi-subagents] Failed to run background fork router:", error);
+		return { decision: "fork" as const, reason: "router-error" };
+	});
+	if (routerDecision.decision !== "fork") {
+		options.onActivity?.();
+		sendFallback(pi, event);
+		return;
+	}
 
 	const run: BackgroundForkRun = (() => {
-		const id = makeRunId(event);
+		const id = options.handlerId ?? makeRunId(event);
 		return {
 			...buildForkRunPaths("subagents", id),
 			type: event.type,
@@ -464,6 +731,15 @@ export async function deliverBackgroundForkEvent(
 		await fs.promises.mkdir(run.sessionDir, { recursive: true });
 		await fs.promises.writeFile(run.eventPath, `${JSON.stringify(event, null, 2)}\n`, "utf8");
 		await fs.promises.writeFile(run.promptPath, buildPrompt(event, run), "utf8");
+		const routed = options.skipBackgroundRoute ? undefined : await routeSubagentBackgroundEvent(event, run).catch((error) => {
+			console.error("[pi-subagents] Failed to route background fork event through background-events:", error);
+			return undefined;
+		});
+		if (routed && routed.disposition !== "handler-starting") {
+			releaseBackgroundForkRun(run.id);
+			options.onActivity?.();
+			return;
+		}
 		await persistRun(run);
 		options.onActivity?.();
 
@@ -483,7 +759,18 @@ export async function deliverBackgroundForkEvent(
 			cwd: run.cwd,
 			stdoutPath: run.stdoutPath,
 			stderrPath: run.stderrPath,
-			env: buildForkHandlerEnv("subagents", run.id, { ...process.env, [SUBAGENT_CHILD_ENV]: "1" }),
+			env: buildForkHandlerEnv("subagents", run.id, {
+				...process.env,
+				[SUBAGENT_CHILD_ENV]: "1",
+				PI_BACKGROUND_FORK_DEPTH: String(currentBackgroundForkDepth() + 1),
+				PI_BACKGROUND_MAX_FORK_DEPTH: String(maxBackgroundForkDepth()),
+				PI_BACKGROUND_HANDLER_ID: run.id,
+				PI_BACKGROUND_EVENT_ID: subagentBackgroundEventId(event, run.id),
+				PI_BACKGROUND_WORK_KEY: subagentWorkKey(event),
+				PI_BACKGROUND_LINEAGE_ID: process.env.PI_BACKGROUND_LINEAGE_ID || subagentWorkKey(event),
+				...(run.parentSessionFile ? { PI_BACKGROUND_PARENT_SESSION_FILE: run.parentSessionFile } : {}),
+				...(run.parentIntercomTarget ? { PI_BACKGROUND_PARENT_INTERCOM_TARGET: run.parentIntercomTarget } : {}),
+			}),
 			onClose: (code, signal) => {
 				options.onActivity?.();
 				const status = code === 0 ? "complete" : "failed";
@@ -492,6 +779,9 @@ export async function deliverBackgroundForkEvent(
 				run.exitCode = code;
 				run.signal = signal;
 				run.finishSource = "close";
+				void completeBackgroundHandler(run).catch((error) => {
+					console.error("[pi-subagents] Failed to complete background event handler:", error);
+				});
 				void patchPersistedRun(run.id, { status, endedAt: run.endedAt, exitCode: code, signal, finishSource: "close" })
 					.catch((error) => {
 						console.error("[pi-subagents] Failed to persist background fork handler completion:", error);
@@ -512,6 +802,9 @@ export async function deliverBackgroundForkEvent(
 			run.status = "failed";
 			run.endedAt = Date.now();
 			run.error = message;
+			await failBackgroundHandlerLaunch(run.id, launch.error).catch((error) => {
+				console.error("[pi-subagents] Failed to compensate background event launch failure:", error);
+			});
 			await patchPersistedRun(run.id, { status: "failed", endedAt: run.endedAt, error: message }).catch((error) => {
 				console.error("[pi-subagents] Failed to persist background fork handler launch failure:", error);
 			});
@@ -523,6 +816,9 @@ export async function deliverBackgroundForkEvent(
 		}
 		run.pid = launch.pid;
 		run.status = "running";
+		await markBackgroundHandlerRunning(run).catch((error) => {
+			console.error("[pi-subagents] Failed to mark background event handler running:", error);
+		});
 		await patchPersistedRun(run.id, { pid: launch.pid, status: "running" });
 		options.onActivity?.();
 		if (resolved.notify === "ack-and-summary") {
@@ -535,6 +831,9 @@ export async function deliverBackgroundForkEvent(
 		run.status = "failed";
 		run.endedAt = Date.now();
 		run.error = error instanceof Error ? error.message : String(error);
+		await failBackgroundHandlerLaunch(run.id, error).catch((compensateError) => {
+			console.error("[pi-subagents] Failed to compensate background event startup failure:", compensateError);
+		});
 		await patchPersistedRun(run.id, { status: "failed", endedAt: run.endedAt, error: run.error }).catch((patchError) => {
 			console.error("[pi-subagents] Failed to persist background fork handler startup failure:", patchError);
 		});

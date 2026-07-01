@@ -48,8 +48,22 @@ export function buildForkHandlerEnv(source: ForkSource, runId: string, extra: No
   return { ...extra, [keys.flag]: "1", [keys.runId]: runId };
 }
 
+function expandHome(input: string, homeDir = os.homedir()): string {
+  return input === "~" || input.startsWith("~/") ? path.join(homeDir, input.slice(2)) : input;
+}
+function sourceStateDirEnv(source: ForkSource): string | undefined {
+  if (source === "return_on") return process.env.PI_RETURN_ON_STATE_DIR;
+  if (source === "intercom") return process.env.PI_INTERCOM_STATE_DIR;
+  return process.env.PI_SUBAGENTS_STATE_DIR;
+}
+export function getForkStateRoot(homeDir = os.homedir()): string {
+  const configured = process.env.PI_FORKS_STATE_ROOT || process.env.PI_BACKGROUND_STATE_DIR;
+  return configured?.trim() ? path.resolve(expandHome(configured.trim(), homeDir)) : path.join(homeDir, ".local", "state");
+}
 export function getForkStateDir(source: ForkSource, homeDir = os.homedir()): string {
-  return path.join(homeDir, ".local", "state", SOURCE_STATE_DIR[source]);
+  const configured = sourceStateDirEnv(source);
+  if (configured?.trim()) return path.resolve(expandHome(configured.trim(), homeDir));
+  return path.join(getForkStateRoot(homeDir), SOURCE_STATE_DIR[source]);
 }
 export function getForkHandlersDir(source: ForkSource, homeDir = os.homedir()): string {
   return path.join(getForkStateDir(source, homeDir), "handlers");

@@ -11,4 +11,5 @@ export const buildForkHandlerEnv = runtime.buildForkHandlerEnv;
 export const buildForkRunPaths = runtime.buildForkRunPaths;
 export const getForkHandlersFile = runtime.getForkHandlersFile;
 export const getForkStateDir = runtime.getForkStateDir;
+export const getForkStateRoot = runtime.getForkStateRoot;
 export const launchDetachedFork = runtime.launchDetachedFork;
