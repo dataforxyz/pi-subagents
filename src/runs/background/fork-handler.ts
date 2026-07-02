@@ -87,6 +87,8 @@ const STARTING_HANDLER_RECONCILE_GRACE_MS = 5_000;
 const HANDLERS_LOCK_TIMEOUT_MS = 5_000;
 const HANDLERS_LOCK_STALE_MS = 30_000;
 const HANDLERS_LOCK_RETRY_MS = 25;
+let backgroundQueueDrainActive = false;
+let backgroundQueueDrainPending = false;
 
 type BackgroundRouterDecision = "fork" | "wake_main" | "display" | "queue";
 type BackgroundEventsModule = {
@@ -326,11 +328,18 @@ async function readPersistedRuns(): Promise<BackgroundForkRun[]> {
 	}
 }
 
+function retainedPersistedRuns(runs: BackgroundForkRun[]): BackgroundForkRun[] {
+	const active = runs.filter((run) => run.status === "starting" || run.status === "running");
+	const activeIds = new Set(active.map((run) => run.id));
+	const terminal = runs.filter((run) => !activeIds.has(run.id)).slice(-MAX_PERSISTED_HANDLERS);
+	return [...terminal, ...active];
+}
+
 async function writePersistedRuns(runs: BackgroundForkRun[]): Promise<void> {
 	const filePath = handlersFile();
 	await fs.promises.mkdir(stateDir(), { recursive: true });
 	const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-	const state: BackgroundForkRunsState = { version: 1, handlers: runs.slice(-MAX_PERSISTED_HANDLERS) };
+	const state: BackgroundForkRunsState = { version: 1, handlers: retainedPersistedRuns(runs) };
 	await fs.promises.writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 	await fs.promises.rename(tmp, filePath);
 }
@@ -623,7 +632,7 @@ export async function drainSubagentBackgroundQueue(
 	if (!module) return 0;
 	const store = new module.BackgroundEventsStore();
 	try {
-		const pass = store.runReconcilerPass({ leaseName: "subagents", ownerId: `subagents:${process.pid}`, leaseTtlMs: 30_000, dequeueLimit: 4 });
+		const pass = store.runReconcilerPass({ leaseName: "subagents", ownerId: `subagents:${process.pid}`, leaseTtlMs: 30_000, dequeueLimit: 4, source: "subagents" });
 		let launched = 0;
 		for (const bundle of pass.launchBundles ?? []) {
 			if (bundle.source !== "subagents") continue;
@@ -637,6 +646,24 @@ export async function drainSubagentBackgroundQueue(
 		return launched;
 	} finally {
 		store.close();
+	}
+}
+
+async function kickSubagentBackgroundQueueDrain(pi: Pick<ExtensionAPI, "sendMessage">, config: BackgroundForkHandlersConfig | undefined, options: { onActivity?: () => void } = {}, reason: string): Promise<void> {
+	if (backgroundQueueDrainActive) {
+		backgroundQueueDrainPending = true;
+		return;
+	}
+	backgroundQueueDrainActive = true;
+	try {
+		do {
+			backgroundQueueDrainPending = false;
+			await drainSubagentBackgroundQueue(pi, config, options);
+		} while (backgroundQueueDrainPending);
+	} catch (error) {
+		console.error(`[pi-subagents] Failed to drain background queue after ${reason}:`, error);
+	} finally {
+		backgroundQueueDrainActive = false;
 	}
 }
 
@@ -704,20 +731,20 @@ export async function deliverBackgroundForkEvent(
 		sendFallback(pi, event);
 		return;
 	}
-	const lineageGate = await chargeBackgroundLineageAutoForkFromEnv().catch((error) => {
-		console.error("[pi-subagents] Failed to charge background lineage for fork delivery:", error);
-		return { allowed: false, reason: "lineage-charge-failed" };
-	});
-	if (!lineageGate.allowed) {
-		options.onActivity?.();
-		sendFallback(pi, event);
-		return;
-	}
 	const routerDecision = await routeSubagentForkWithOptionalRouter(event, resolved).catch((error) => {
 		console.error("[pi-subagents] Failed to run background fork router:", error);
 		return { decision: "fork" as const, reason: "router-error" };
 	});
 	if (routerDecision.decision !== "fork") {
+		options.onActivity?.();
+		sendFallback(pi, event);
+		return;
+	}
+	const lineageGate = await chargeBackgroundLineageAutoForkFromEnv().catch((error) => {
+		console.error("[pi-subagents] Failed to charge background lineage for fork delivery:", error);
+		return { allowed: false, reason: "lineage-charge-failed" };
+	});
+	if (!lineageGate.allowed) {
 		options.onActivity?.();
 		sendFallback(pi, event);
 		return;
@@ -796,9 +823,12 @@ export async function deliverBackgroundForkEvent(
 				run.exitCode = code;
 				run.signal = signal;
 				run.finishSource = "close";
-				void completeBackgroundHandler(run).catch((error) => {
-					console.error("[pi-subagents] Failed to complete background event handler:", error);
-				});
+				void (async () => {
+					await completeBackgroundHandler(run).catch((error) => {
+						console.error("[pi-subagents] Failed to complete background event handler:", error);
+					});
+					await kickSubagentBackgroundQueueDrain(pi, config, { onActivity: options.onActivity }, `handler ${run.id} finished`);
+				})();
 				void patchPersistedRun(run.id, { status, endedAt: run.endedAt, exitCode: code, signal, finishSource: "close" })
 					.catch((error) => {
 						console.error("[pi-subagents] Failed to persist background fork handler completion:", error);
