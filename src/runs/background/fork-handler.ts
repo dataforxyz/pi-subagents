@@ -89,6 +89,8 @@ const HANDLERS_LOCK_STALE_MS = 30_000;
 const HANDLERS_LOCK_RETRY_MS = 25;
 let backgroundQueueDrainActive = false;
 let backgroundQueueDrainPending = false;
+let backgroundQueueDrainTimer: ReturnType<typeof setTimeout> | undefined;
+const MAX_BACKGROUND_QUEUE_DRAIN_PASSES = 5;
 
 type BackgroundRouterDecision = "fork" | "wake_main" | "display" | "queue";
 type BackgroundEventsModule = {
@@ -460,9 +462,10 @@ function summarizeForkRun(run: BackgroundForkRun): BackgroundForkRunSummary {
 }
 
 export async function reconcileBackgroundForkRuns(): Promise<number> {
-	return await withPersistedRunsLock(async () => {
+	const reconciledRuns: BackgroundForkRun[] = [];
+	const changed = await withPersistedRunsLock(async () => {
 		const runs = await readPersistedRuns();
-		let changed = 0;
+		let changedCount = 0;
 		const now = Date.now();
 		const next = runs.map((run) => {
 			if (run.status !== "starting" && run.status !== "running") return run;
@@ -470,8 +473,8 @@ export async function reconcileBackgroundForkRuns(): Promise<number> {
 			if (run.status === "starting" && !run.pid && now - (run.startedAt ?? now) < STARTING_HANDLER_RECONCILE_GRACE_MS) return run;
 			const stderr = fs.existsSync(run.stderrPath) ? fs.readFileSync(run.stderrPath, "utf8") : "";
 			const status = run.status === "starting" || stderr.trim() ? "failed" : "complete";
-			changed += 1;
-			return {
+			changedCount += 1;
+			const reconciled = {
 				...run,
 				status,
 				endedAt: run.endedAt ?? now,
@@ -480,10 +483,18 @@ export async function reconcileBackgroundForkRuns(): Promise<number> {
 				finishSource: "reconciled" as const,
 				...(status === "failed" ? { error: run.error || stderr.trim() || "handler was still starting when reconciliation found no live pid" } : {}),
 			};
+			reconciledRuns.push(reconciled);
+			return reconciled;
 		});
-		if (changed > 0) await writePersistedRuns(next);
-		return changed;
+		if (changedCount > 0) await writePersistedRuns(next);
+		return changedCount;
 	});
+	for (const run of reconciledRuns) {
+		await completeBackgroundHandler(run).catch((error) => {
+			console.error("[pi-subagents] Failed to complete reconciled background event handler:", error);
+		});
+	}
+	return changed;
 }
 
 export async function listActiveBackgroundForkRunsForParent(parentSessionFile: string | null | undefined): Promise<BackgroundForkRunSummary[]> {
@@ -649,22 +660,36 @@ export async function drainSubagentBackgroundQueue(
 	}
 }
 
-async function kickSubagentBackgroundQueueDrain(pi: Pick<ExtensionAPI, "sendMessage">, config: BackgroundForkHandlersConfig | undefined, options: { onActivity?: () => void } = {}, reason: string): Promise<void> {
+function kickSubagentBackgroundQueueDrain(pi: Pick<ExtensionAPI, "sendMessage">, config: BackgroundForkHandlersConfig | undefined, options: { onActivity?: () => void } = {}, reason: string): void {
+	if (backgroundQueueDrainTimer) {
+		backgroundQueueDrainPending = true;
+		return;
+	}
+	backgroundQueueDrainTimer = setTimeout(() => {
+		void drainSubagentBackgroundQueueLoop(pi, config, options, reason);
+	}, 0);
+	backgroundQueueDrainTimer.unref?.();
+}
+
+async function drainSubagentBackgroundQueueLoop(pi: Pick<ExtensionAPI, "sendMessage">, config: BackgroundForkHandlersConfig | undefined, options: { onActivity?: () => void } = {}, reason: string): Promise<void> {
+	backgroundQueueDrainTimer = undefined;
 	if (backgroundQueueDrainActive) {
 		backgroundQueueDrainPending = true;
 		return;
 	}
 	backgroundQueueDrainActive = true;
 	try {
-		do {
+		for (let pass = 0; pass < MAX_BACKGROUND_QUEUE_DRAIN_PASSES; pass += 1) {
 			backgroundQueueDrainPending = false;
-			await drainSubagentBackgroundQueue(pi, config, options);
-		} while (backgroundQueueDrainPending);
+			const launched = await drainSubagentBackgroundQueue(pi, config, options);
+			if (!backgroundQueueDrainPending && launched === 0) break;
+		}
 	} catch (error) {
 		console.error(`[pi-subagents] Failed to drain background queue after ${reason}:`, error);
 	} finally {
 		backgroundQueueDrainActive = false;
 	}
+	if (backgroundQueueDrainPending) kickSubagentBackgroundQueueDrain(pi, config, options, "coalesced drain");
 }
 
 async function chargeBackgroundLineageAutoForkFromEnv(): Promise<{ allowed: boolean; reason?: string }> {
@@ -824,19 +849,19 @@ export async function deliverBackgroundForkEvent(
 				run.signal = signal;
 				run.finishSource = "close";
 				void (async () => {
+					await patchPersistedRun(run.id, { status, endedAt: run.endedAt, exitCode: code, signal, finishSource: "close" })
+						.catch((error) => {
+							console.error("[pi-subagents] Failed to persist background fork handler completion:", error);
+						})
+						.finally(() => {
+							releaseBackgroundForkRun(run.id);
+							options.onActivity?.();
+						});
 					await completeBackgroundHandler(run).catch((error) => {
 						console.error("[pi-subagents] Failed to complete background event handler:", error);
 					});
-					await kickSubagentBackgroundQueueDrain(pi, config, { onActivity: options.onActivity }, `handler ${run.id} finished`);
+					kickSubagentBackgroundQueueDrain(pi, config, { onActivity: options.onActivity }, `handler ${run.id} finished`);
 				})();
-				void patchPersistedRun(run.id, { status, endedAt: run.endedAt, exitCode: code, signal, finishSource: "close" })
-					.catch((error) => {
-						console.error("[pi-subagents] Failed to persist background fork handler completion:", error);
-					})
-					.finally(() => {
-						releaseBackgroundForkRun(run.id);
-						options.onActivity?.();
-					});
 				if (resolved.notify !== "summary" && resolved.notify !== "ack-and-summary") return;
 				pi.sendMessage(
 					{ customType: "subagent-fork-handler", content: formatSummary(run, status, code, signal), display: true, details: { id: run.id, type: run.type, status, dir: run.dir, pid: run.pid, exitCode: code, signal } },
